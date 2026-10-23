@@ -23,6 +23,7 @@
 //! - `wcs_origin` is part zero (G54) in the base frame with every axis at home.
 //!   Its axes are parallel to the base axes.
 
+use crate::collision::BodyDef;
 use crate::math::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -122,6 +123,11 @@ pub struct MachineDef {
     /// deviation).
     #[serde(default = "default_junction_deviation")]
     pub junction_deviation: f64,
+    /// Machine geometry for collision checks (role = "machine", attached to
+    /// "base", "head", "table" or an axis letter; given at home in the base
+    /// frame). STL paths are relative to the machine file.
+    #[serde(default)]
+    pub components: Vec<BodyDef>,
 }
 
 fn default_junction_deviation() -> f64 {

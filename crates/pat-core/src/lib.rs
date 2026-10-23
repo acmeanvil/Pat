@@ -12,8 +12,15 @@
 //! - [`gcode`] and [`interp`]: G-code parsing and modal interpretation.
 //! - [`sim`]: replays a program on a machine and reports problems.
 //! - [`post`]: turns tool-tip + tool-axis paths (CL data) into G-code.
+//! - [`geom`] and [`collision`]: meshes, BVH, tool assemblies, and
+//!   tool / holder / fixture / machine collision checks.
+//! - [`access`]: planning queries: clearance, tilt-to-avoid and reachable
+//!   tool directions.
 
+pub mod access;
+pub mod collision;
 pub mod gcode;
+pub mod geom;
 pub mod interp;
 pub mod kinematics;
 pub mod machine;

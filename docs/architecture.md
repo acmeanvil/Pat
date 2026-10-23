@@ -94,38 +94,77 @@ Still not covered:
 - G87 back boring and G74 left-hand tapping;
 - jerk limits and servo lag in the time estimate.
 
+## Milestone 2: collision layer (done)
+
+- **Geometry** (`geom`):
+  - triangle meshes from binary/ASCII STL, boxes and cylinders;
+  - an AABB tree;
+  - an exact finite-cylinder-vs-triangle test (slab clip plus
+    axis-to-polygon distance);
+  - triangle-triangle and point-in-mesh (ray parity) tests.
+- **Scene** (`collision`):
+  - **Tools** are stacks of cutter, shank and holder sections. Cones are
+    stepped with the larger radius, so checks err on the safe side.
+  - **Part, stock and fixture bodies** are given in WCS coordinates and ride
+    on the table.
+  - **Machine components** are declared in the machine file and attach to
+    any link (base, head, table or a specific axis).
+- **Checks.** Each sampled position, at a 1 mm step along linear motion and
+  0.5° of rotary motion, is checked for:
+  - holder or shank hitting anything;
+  - the cutter hitting a fixture or machine component;
+  - the cutter inside the part during a rapid;
+  - machine bodies colliding across head, table and base. This includes
+    bodies nested wholly inside one another.
+
+  Each collision is reported with the line, both bodies and the tool-tip
+  position.
+- **Planning** (`access`):
+  - `clearance`: how far the tool assembly clears everything;
+  - `tilt_to_avoid`: the smallest tilt from a preferred axis that is
+    reachable within limits and collision-free with a margin. Among
+    directions at that tilt it picks the one with the most clearance and
+    explains the choice, e.g. *"preferred axis blocked (T1 holder vs tall
+    clamp); tilted 5.0° toward −Y for 1.4 mm clearance"*;
+  - `reachable_directions`: an accessibility map over a cone of tool axes.
+- **Front ends.** `pat check --scene`, `pat tilt`, `pat reach` and the
+  Python functions `check(..., scene_toml)`, `tilt` and `reach`.
+
+Known limits:
+- Stock is not updated by cutting yet (no material-removal simulation), so
+  the cutter is not checked against stock, and rapids are checked against the
+  finished part.
+- Feed moves into the part are not yet reported as gouges.
+- Meshes must be closed.
+- Exactly coplanar contact is not reported.
+- Machine-to-machine checks have no clearance margin.
+
 ## Roadmap
 
-1. **Collision layer.**
-   - Tool, holder, fixture, stock and machine-component solids attached to the
-     kinematic chains.
-   - BVH/SDF distance queries, plus collision checks in `sim` during G-code
-     replay.
-   - Tilt-to-avoid: find the minimum tilt away from a preferred axis that
-     clears the holder, with an explanation of why each tilt was chosen.
-   - An accessibility and reachability map per surface.
-2. **3+2 and HSM roughing.**
-   - Automatic 3+2 orientation selection from reachability.
+1. **3+2 and HSM roughing.**
+   - Automatic 3+2 orientation selection from the reachability map.
    - Adaptive (constant-engagement) clearing in 2.5D and 3D (z-level), with
      engagement-based feed control.
    - Rest machining.
+   - A material-removal model (dexel or voxel stock) for in-process stock,
+     gouge checks and rapids through remaining stock.
 
    All GPL CAM code is used for reference only: algorithms are reimplemented
    from published papers.
-3. **4-axis.** Continuous rotary roughing and finishing, plus wrap and unwrap.
-4. **5-axis finishing.**
+2. **4-axis.** Continuous rotary roughing and finishing, plus wrap and unwrap.
+3. **5-axis finishing.**
    - Swarf, multi-axis flowline and surface-normal strategies with lead/lag and
      tilt control.
    - Tool-axis smoothing.
    - One application pack: port machining is the first candidate.
-5. **AI agent integration.**
+4. **AI agent integration.**
    - An MCP server exposing `machine`, `check`, `post`, `ik`, and later `plan`,
      `collide` and `reach` as tools.
    - The agent proposes setups and orientations, and explains simulator
      findings in shop terms.
    - The agent never bypasses verification: every agent-produced program goes
      through `check`.
-6. **Fusion adapter.**
+5. **Fusion adapter.**
    - The add-in reads the machine definition (`adsk.cam.Machine`), BRep/mesh,
      stock and tools.
    - It runs `pat` through the Python wheel and previews toolpaths with custom

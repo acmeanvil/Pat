@@ -142,6 +142,53 @@ impl Kinematics {
         &self.rotary
     }
 
+    /// Resolve where a rigid body is attached: "base", "head", "table",
+    /// "part" (part zero, i.e. the WCS), "tool", or an axis name meaning the
+    /// link carried by that axis.
+    pub fn link(&self, name: &str) -> Option<Link> {
+        match name.to_ascii_lowercase().as_str() {
+            "base" => Some(Link::Base),
+            "head" | "spindle" => Some(Link::Head(self.head.len())),
+            "table" => Some(Link::Table(self.table.len())),
+            "part" | "wcs" => Some(Link::Part),
+            "tool" => Some(Link::Tool),
+            _ => {
+                let i = self.def.axis_index(name)?;
+                let pos = |chain: &[usize]| chain.iter().position(|&c| c == i).map(|p| p + 1);
+                pos(&self.head)
+                    .map(Link::Head)
+                    .or_else(|| pos(&self.table).map(Link::Table))
+            }
+        }
+    }
+
+    /// Placement in the machine base frame of a body attached to `link`, for
+    /// joints `q`. Body geometry is given in the base frame at home, except:
+    /// [`Link::Part`] geometry is in WCS coordinates, and [`Link::Tool`]
+    /// geometry is in the tool frame (tip at the origin, +Z toward the spindle).
+    pub fn link_iso(&self, link: Link, q: &[f64]) -> Iso {
+        let chain = |c: &[usize], n: usize| {
+            c[..n.min(c.len())]
+                .iter()
+                .fold(Iso::IDENTITY, |acc, &i| acc.then(&self.joint_iso(i, q[i])))
+        };
+        match link {
+            Link::Base => Iso::IDENTITY,
+            Link::Head(n) => chain(&self.head, n),
+            Link::Table(n) => chain(&self.table, n),
+            Link::Part => {
+                chain(&self.table, self.table.len()).then(&Iso::translation(self.def.wcs_origin))
+            }
+            Link::Tool => {
+                let home = Iso {
+                    r: frame_from_z(self.def.spindle.direction),
+                    t: self.tip_home,
+                };
+                chain(&self.head, self.head.len()).then(&home)
+            }
+        }
+    }
+
     fn joint_iso(&self, i: usize, v: f64) -> Iso {
         let a = &self.def.axes[i];
         match a.kind {
@@ -388,6 +435,26 @@ impl Kinematics {
         }
         v
     }
+}
+
+/// Where a rigid body rides on the machine (see [`Kinematics::link_iso`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Link {
+    Base,
+    /// After the first n axes of the head chain.
+    Head(usize),
+    /// After the first n axes of the table chain.
+    Table(usize),
+    Part,
+    Tool,
+}
+
+/// A rotation whose third column is `z` (unit).
+pub fn frame_from_z(z: Vec3) -> Mat3 {
+    let helper = if z.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
+    let x = (helper - z * helper.dot(z)).normalized().unwrap_or(Vec3::X);
+    let y = z.cross(x);
+    Mat3::from_cols(x, y, z)
 }
 
 /// Angle into (-180, 180].

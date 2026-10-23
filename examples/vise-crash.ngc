@@ -1,0 +1,23 @@
+(Collision demo: pat check examples/vise-crash.ngc -m machines/trunnion-ac.toml --scene examples/vise-setup.toml)
+G21 G90 G17 G94
+G54
+T1 M6
+G43 H1
+S12000 M3
+(1. Feed down beside the moving jaw, then sideways into it)
+G0 X0 Y-60 Z20 A0 C0
+G1 Z-12 F600
+G1 Y-30
+G0 Z20
+(2. Rapid straight down into the part instead of feeding)
+G0 X0 Y0
+G0 Z-3
+G0 Z20
+(3. Holder clips the tall clamp while finishing near it)
+G1 X0 Y15 Z0 F600
+G1 Z-6
+G0 Z20
+(4. Cradle to 90 degrees with the tool parked low: housing meets the platter)
+G43.4 H1
+G0 A90 C0
+M30

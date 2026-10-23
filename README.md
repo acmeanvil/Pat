@@ -11,10 +11,13 @@ The goal is a toolpath planner with these features:
 The core is a Rust library with Python bindings. Fusion is the first host, and
 the same engine works from the command line or any Python environment.
 
-**Status: milestone 1 of 6, the kinematics and verification foundation.**
-It covers machine models, forward and inverse kinematics, a G-code simulator
-and a multi-axis post. The simulator handles work offsets, canned cycles,
-subroutines, G68.2 tilted planes and acceleration-aware cycle time. See [docs/architecture.md](docs/architecture.md) for the
+**Status: milestones 1 and 2 of 6 are done.**
+
+- **Milestone 1:** machine models, forward and inverse kinematics, a G-code
+  simulator and a multi-axis post. The simulator covers work offsets, canned
+  cycles, subroutines, G68.2 tilted planes and acceleration-aware cycle time.
+- **Milestone 2:** tool, holder, fixture and machine collision checking, plus
+  explainable tilt-to-avoid and reachability maps. See [docs/architecture.md](docs/architecture.md) for the
 design and roadmap, and
 [reports/CAM software landscape survey.md](reports/CAM%20software%20landscape%20survey.md)
 for the market research behind it.
@@ -44,6 +47,12 @@ cargo run -- check examples/bad-trunnion.ngc -m machines/trunnion-ac.toml --tool
 
 # Kinematics
 cargo run -- ik -m machines/trunnion-ac.toml --tip 0,0,0 --axis 0,0.5,0.866 --tool-length 100
+
+# Collisions: tools, vise and part from a setup file, plus the machine's own geometry
+cargo run -- check examples/vise-crash.ngc -m machines/trunnion-ac.toml --scene examples/vise-setup.toml
+
+# Smallest tilt that clears the clamp, with an explanation
+cargo run -- tilt -m machines/trunnion-ac.toml --scene examples/vise-setup.toml --tool 1 --tip 0,15,0
 ```
 
 Add `--json` to `check` or `machine` for machine-readable output. Use

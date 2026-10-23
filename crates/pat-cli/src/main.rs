@@ -6,12 +6,16 @@
 //! pat post path.json --machine machines/trunnion-ac.toml --dialect linuxcnc-joint -o out.ngc
 //! pat fk --machine m.toml --joints X=0,Y=0,Z=-300,A=30,C=45 --tool-length 100
 //! pat ik --machine m.toml --tip 10,0,5 --axis 0,0.5,0.866 --tool-length 100
+//! pat check program.ngc -m machines/trunnion-ac.toml --scene examples/vise-setup.toml
+//! pat tilt -m machines/trunnion-ac.toml --scene examples/vise-setup.toml --tool 1 --tip 0,0,0
 //! ```
 //!
 //! Every subcommand can print JSON (`--json`) so scripts and AI agents can
 //! consume the results directly.
 
 use clap::{Parser, Subcommand, ValueEnum};
+use pat_core::access::{cap_directions, reachable_directions, tilt_to_avoid, TiltOptions};
+use pat_core::collision::{SceneDef, World};
 use pat_core::interp::Severity;
 use pat_core::math::Vec3;
 use pat_core::post::{post, ClProgram, Dialect, PostOptions};
@@ -19,6 +23,7 @@ use pat_core::sim::{simulate, SimOptions};
 use pat_core::{Kinematics, MachineDef, Pose};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -60,11 +65,59 @@ enum Cmd {
         /// Read P dwell words as milliseconds (Fanuc / Haas).
         #[arg(long)]
         dwell_ms: bool,
+        /// Setup file (tools, part, stock, fixtures) for collision checks.
+        #[arg(long)]
+        scene: Option<PathBuf>,
+        /// Tool already in the spindle at program start.
+        #[arg(long)]
+        initial_tool: Option<u32>,
         /// Include the machine state after every move.
         #[arg(long)]
         trace: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Smallest tilt from a preferred tool axis that reaches a point without
+    /// collision (prints JSON with an explanation).
+    Tilt {
+        #[arg(short, long)]
+        machine: PathBuf,
+        #[arg(long)]
+        scene: PathBuf,
+        #[arg(long)]
+        tool: u32,
+        /// Tool tip in WCS coordinates.
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true)]
+        tip: Vec3,
+        /// Preferred tool axis (default straight up).
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true, default_value = "0,0,1")]
+        axis: Vec3,
+        /// Required clearance (mm).
+        #[arg(long, default_value_t = 1.0)]
+        margin: f64,
+        /// Largest tilt to try (degrees).
+        #[arg(long, default_value_t = 60.0)]
+        max_tilt: f64,
+    },
+    /// Reachability map: which tool directions around an axis reach a point.
+    Reach {
+        #[arg(short, long)]
+        machine: PathBuf,
+        #[arg(long)]
+        scene: PathBuf,
+        #[arg(long)]
+        tool: u32,
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true)]
+        tip: Vec3,
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true, default_value = "0,0,1")]
+        axis: Vec3,
+        /// Cone half-angle to sample (degrees).
+        #[arg(long, default_value_t = 60.0)]
+        cone: f64,
+        #[arg(long, default_value_t = 200)]
+        samples: usize,
+        #[arg(long, default_value_t = 1.0)]
+        margin: f64,
     },
     /// Post a CL path (JSON) to G-code.
     Post {
@@ -131,6 +184,31 @@ fn parse_vec3(s: &str) -> Result<Vec3, String> {
         return Err("expected x,y,z".into());
     }
     Ok(Vec3::new(v[0], v[1], v[2]))
+}
+
+/// Build the collision world for a machine file and an optional scene file.
+fn load_world(
+    machine_path: &Path,
+    m: &MachineDef,
+    scene: Option<&Path>,
+) -> Result<pat_core::collision::World, String> {
+    let scene_def = match scene {
+        Some(p) => SceneDef::from_toml(&read(p)?).map_err(|e| format!("{}: {e}", p.display()))?,
+        None => SceneDef::default(),
+    };
+    let kin = Kinematics::new(m.clone(), m.default_tool_length).map_err(|e| e.to_string())?;
+    World::build(
+        &kin,
+        &scene_def,
+        scene.and_then(Path::parent),
+        machine_path.parent(),
+    )
+}
+
+fn tool_length_for(world: &World, m: &MachineDef, tool: u32) -> f64 {
+    world
+        .tool(tool)
+        .map_or(m.default_tool_length, |t| t.def.gauge_length)
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -203,12 +281,22 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             tip_tolerance,
             offsets,
             dwell_ms,
+            scene,
+            initial_tool,
             trace,
             json,
         } => {
             let m = load_machine(&machine)?;
             let src = read(&program)?;
+            // Collision checks run when a scene is given or the machine has geometry.
+            let world = if scene.is_some() || !m.components.is_empty() {
+                Some(Arc::new(load_world(&machine, &m, scene.as_deref())?))
+            } else {
+                None
+            };
             let opts = SimOptions {
+                world,
+                initial_tool,
                 tool_lengths: tools.into_iter().collect(),
                 tool_length,
                 tip_tolerance,
@@ -309,6 +397,59 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     "tip": pose.tip, "axis": pose.axis,
                     "program": k.to_program(&q),
                     "limit_violations": k.limit_violations(&q).iter().map(|(i, v)| (m.axes[*i].name.clone(), *v)).collect::<Vec<_>>(),
+                }))
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Tilt {
+            machine,
+            scene,
+            tool,
+            tip,
+            axis,
+            margin,
+            max_tilt,
+        } => {
+            let m = load_machine(&machine)?;
+            let world = load_world(&machine, &m, Some(&scene))?;
+            let k = Kinematics::new(m.clone(), tool_length_for(&world, &m, tool))
+                .map_err(|e| e.to_string())?;
+            let opts = TiltOptions {
+                margin,
+                max_tilt_deg: max_tilt,
+                ..Default::default()
+            };
+            let r = tilt_to_avoid(&k, &world, tool, tip, axis, None, &opts);
+            println!("{}", to_json(&r));
+            Ok(if r.axis.is_some() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            })
+        }
+        Cmd::Reach {
+            machine,
+            scene,
+            tool,
+            tip,
+            axis,
+            cone,
+            samples,
+            margin,
+        } => {
+            let m = load_machine(&machine)?;
+            let world = load_world(&machine, &m, Some(&scene))?;
+            let k = Kinematics::new(m.clone(), tool_length_for(&world, &m, tool))
+                .map_err(|e| e.to_string())?;
+            let dirs = cap_directions(axis, cone, samples);
+            let map = reachable_directions(&k, &world, tool, tip, &dirs, margin, 25.0);
+            let reachable = map.iter().filter(|d| d.reachable).count();
+            println!(
+                "{}",
+                to_json(&serde_json::json!({
+                    "reachable": reachable,
+                    "total": map.len(),
+                    "directions": map,
                 }))
             );
             Ok(ExitCode::SUCCESS)

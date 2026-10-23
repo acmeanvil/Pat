@@ -1,0 +1,54 @@
+# Job setup for collision checks on machines/trunnion-ac.toml.
+# Part, stock and fixture geometry is in WCS (G54) coordinates.
+# Bodies can also be STL files: shape = { type = "stl", path = "part.stl" }
+
+[[tools]]
+number = 1
+name = "10 mm flat end mill, shrink-fit holder"
+gauge_length = 100.0
+segments = [
+  { kind = "cutter", length = 22.0, diameter = 10.0 },
+  { kind = "shank",  length = 18.0, diameter = 10.0 },
+  { kind = "holder", length = 35.0, diameter_bottom = 24.0, diameter_top = 32.0 },
+  { kind = "holder", length = 25.0, diameter = 50.0 },
+]
+
+[[tools]]
+number = 2
+name = "6 mm ball end mill, collet chuck"
+gauge_length = 90.0
+segments = [
+  { kind = "cutter", length = 12.0, diameter = 6.0 },
+  { kind = "shank",  length = 18.0, diameter = 6.0 },
+  { kind = "holder", length = 40.0, diameter_bottom = 30.0, diameter_top = 42.0 },
+]
+
+[[bodies]]
+name = "part"
+role = "part"
+shape = { type = "box", min = [-25.0, -20.0, -30.0], max = [25.0, 20.0, 0.0] }
+
+[[bodies]]
+name = "stock"
+role = "stock"
+shape = { type = "box", min = [-27.0, -22.0, -30.0], max = [27.0, 22.0, 2.0] }
+
+[[bodies]]
+name = "fixed jaw"
+role = "fixture"
+shape = { type = "box", min = [-40.0, 22.0, -45.0], max = [40.0, 40.0, -8.0] }
+
+[[bodies]]
+name = "moving jaw"
+role = "fixture"
+shape = { type = "box", min = [-40.0, -40.0, -45.0], max = [40.0, -22.0, -8.0] }
+
+[[bodies]]
+name = "vise body"
+role = "fixture"
+shape = { type = "box", min = [-45.0, -60.0, -50.0], max = [45.0, 60.0, -30.0] }
+
+[[bodies]]
+name = "tall clamp"
+role = "fixture"
+shape = { type = "box", min = [-15.0, 26.0, -8.0], max = [15.0, 40.0, 60.0] }

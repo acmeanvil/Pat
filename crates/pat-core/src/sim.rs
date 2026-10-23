@@ -22,6 +22,7 @@
 //! ranges. The output is plain serialisable data so a UI or an AI agent can
 //! consume it directly.
 
+use crate::collision::{MoveClass, World};
 use crate::gcode::parse_program;
 use crate::interp::{
     interpret, ArcCenter, Coords, Cycle, Event, Feed, InterpOptions, Motion, MotionKind, Plane,
@@ -34,6 +35,7 @@ use crate::planner::{plan_time, PlanSeg};
 use crate::subs::expand;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -60,6 +62,15 @@ pub struct SimOptions {
     pub work_offsets: BTreeMap<String, Vec3>,
     /// Read `P` dwell words as milliseconds (Fanuc / Haas).
     pub dwell_p_milliseconds: bool,
+    /// Tool, part, fixture and machine geometry. When present, every move
+    /// is checked for collisions.
+    #[serde(skip)]
+    pub world: Option<Arc<World>>,
+    /// Tool number in the spindle at program start (for collision checks
+    /// before the first M6).
+    pub initial_tool: Option<u32>,
+    /// Collision sampling step along linear motion (mm).
+    pub collision_step_mm: f64,
 }
 
 impl Default for SimOptions {
@@ -75,6 +86,9 @@ impl Default for SimOptions {
             max_issues: 500,
             work_offsets: BTreeMap::new(),
             dwell_p_milliseconds: false,
+            world: None,
+            initial_tool: None,
+            collision_step_mm: 1.0,
         }
     }
 }
@@ -175,6 +189,7 @@ struct Sim<'a> {
     plan: Vec<PlanSeg>,
     stop_next: bool,
     cycle_initial: Option<f64>,
+    tool: Option<u32>,
 }
 
 /// Rotation of a G68.2 frame: intrinsic Z-X-Z Euler angles.
@@ -204,11 +219,20 @@ impl<'a> Sim<'a> {
             lo: vec![f64::INFINITY; n],
             hi: vec![f64::NEG_INFINITY; n],
             trace: opts.record_trace.then(Vec::new),
-            tool_length: opts.tool_length.unwrap_or(def.default_tool_length),
+            tool_length: opts
+                .initial_tool
+                .and_then(|t| opts.tool_lengths.get(&t).copied())
+                .or(opts.tool_length)
+                .or_else(|| {
+                    let t = opts.initial_tool?;
+                    Some(opts.world.as_ref()?.tool(t)?.def.gauge_length)
+                })
+                .unwrap_or(def.default_tool_length),
             wcs: "G54".into(),
             plan: Vec::new(),
             stop_next: true,
             cycle_initial: None,
+            tool: opts.initial_tool,
         };
         s.rebuild_kinematics(0);
         s
@@ -258,8 +282,21 @@ impl<'a> Sim<'a> {
     }
 
     fn issue(&mut self, line: usize, severity: Severity, code: &str, message: String) {
-        // One issue per (line, code) keeps reports readable.
-        if !self.seen.insert((line, code.to_string())) {
+        self.issue_keyed(line, severity, code, code, message);
+    }
+
+    /// Like [`Self::issue`], deduplicated on (line, `key`) instead of
+    /// (line, code), so distinct collisions on one line are all reported.
+    fn issue_keyed(
+        &mut self,
+        line: usize,
+        severity: Severity,
+        code: &str,
+        key: &str,
+        message: String,
+    ) {
+        // One issue per (line, key) keeps reports readable.
+        if !self.seen.insert((line, key.to_string())) {
             return;
         }
         if self.issues.len() >= self.opts.max_issues {
@@ -283,8 +320,25 @@ impl<'a> Sim<'a> {
                 message,
             } => self.issue(line, severity, code, message),
             Event::ToolChange { line, tool } => {
-                let len = match self.opts.tool_lengths.get(&tool) {
-                    Some(&l) => l,
+                self.tool = Some(tool);
+                let from_world = self
+                    .opts
+                    .world
+                    .as_ref()
+                    .and_then(|w| w.tool(tool))
+                    .map(|t| t.def.gauge_length);
+                if self.opts.world.is_some() && from_world.is_none() {
+                    self.issue(
+                        line,
+                        Severity::Warning,
+                        "tool_geometry",
+                        format!(
+                            "T{tool} has no geometry in the scene; it is not collision checked"
+                        ),
+                    );
+                }
+                let len = match self.opts.tool_lengths.get(&tool).copied().or(from_world) {
+                    Some(l) => l,
                     None => {
                         let l = self
                             .opts
@@ -612,11 +666,20 @@ impl<'a> Sim<'a> {
             .iter()
             .map(|&i| (qb[i] - qa[i]).abs())
             .fold(0.0, f64::max);
-        let n = if max_rot > 1e-9 {
+        let mut n = if max_rot > 1e-9 {
             (max_rot / self.opts.sample_deg).ceil().max(2.0) as usize
         } else {
             1
         };
+        if self.opts.world.is_some() {
+            let max_lin = kin
+                .linear_axes()
+                .iter()
+                .map(|&i| (qb[i] - qa[i]).abs())
+                .fold(0.0, f64::max);
+            let step = self.opts.collision_step_mm.max(0.01);
+            n = n.max((max_lin / step).ceil() as usize).clamp(1, 100_000);
+        }
 
         let tip_a = kin.forward(&qa).tip;
         let tip_b = kin.forward(&qb).tip;
@@ -646,6 +709,7 @@ impl<'a> Sim<'a> {
                 }
             };
             self.check_limits(line, &q);
+            self.check_collisions(kin, line, rapid, &q);
             samples.push(q.clone());
             let pose = kin.forward(&q);
             if let Some(s) = kin.singularity_angle_deg(pose.axis) {
@@ -769,6 +833,32 @@ impl<'a> Sim<'a> {
             });
         }
         self.q = qb;
+    }
+
+    fn check_collisions(&mut self, kin: &Kinematics, line: usize, rapid: bool, q: &[f64]) {
+        let Some(world) = self.opts.world.clone() else {
+            return;
+        };
+        let class = if rapid {
+            MoveClass::Rapid
+        } else {
+            MoveClass::Feed
+        };
+        for c in world.check(kin, q, self.tool, class, 0.0) {
+            let pose = kin.forward(q);
+            let at = format!(
+                "tip at X{:.3} Y{:.3} Z{:.3}",
+                pose.tip.x, pose.tip.y, pose.tip.z
+            );
+            let key = format!("collision:{}:{}", c.a, c.b);
+            if c.a.ends_with("cutter") && c.role == crate::collision::Role::Part {
+                let msg = format!("rapid move with the {} inside {} ({at})", c.a, c.b);
+                self.issue_keyed(line, Severity::Error, "rapid_into_part", &key, msg);
+            } else {
+                let msg = format!("{} hits {} ({at})", c.a, c.b);
+                self.issue_keyed(line, Severity::Error, "collision", &key, msg);
+            }
+        }
     }
 
     fn check_limits(&mut self, line: usize, q: &[f64]) {
