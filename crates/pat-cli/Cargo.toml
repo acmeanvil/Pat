@@ -1,0 +1,18 @@
+[package]
+name = "pat-cli"
+description = "Command-line front end for the Pat CAM core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pat"
+path = "src/main.rs"
+
+[dependencies]
+pat-core.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true

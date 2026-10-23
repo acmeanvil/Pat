@@ -1,0 +1,51 @@
+# Head-head (fork head) 5-axis, typical of gantry and large-part machines:
+# C swivels the head about Z, A tilts the fork about X. The part does not move.
+name = "Generic head-head CA (fork head)"
+description = "Gantry-style fork head: C about Z, then A about X, pivot 200 mm above the gauge line"
+default_tool_length = 150.0
+wcs_origin = [0.0, 0.0, 0.0]
+
+[spindle]
+gauge_point = [0.0, 0.0, 600.0]
+
+[[axes]]
+name = "X"
+kind = "linear"
+chain = "head"
+direction = [1.0, 0.0, 0.0]
+min = -1500.0
+max = 1500.0
+
+[[axes]]
+name = "Y"
+kind = "linear"
+chain = "head"
+direction = [0.0, 1.0, 0.0]
+min = -1000.0
+max = 1000.0
+
+[[axes]]
+name = "Z"
+kind = "linear"
+chain = "head"
+direction = [0.0, 0.0, 1.0]
+min = -800.0
+max = 200.0
+
+[[axes]]
+name = "C"
+kind = "rotary"
+chain = "head"
+direction = [0.0, 0.0, 1.0]
+point = [0.0, 0.0, 800.0]
+min = -360.0
+max = 360.0
+
+[[axes]]
+name = "A"
+kind = "rotary"
+chain = "head"
+direction = [1.0, 0.0, 0.0]
+point = [0.0, 0.0, 800.0]
+min = -100.0
+max = 100.0

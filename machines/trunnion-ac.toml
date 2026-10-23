@@ -1,0 +1,59 @@
+# Generic table-table 5-axis trunnion: A tilts the cradle about X,
+# C spins the platter riding on it. Head carries X, Y, Z.
+# Machine zero: the A and C axes intersect at the base-frame origin
+# when all axes are home.
+
+name = "Generic trunnion AC (table-table)"
+description = "A tilting cradle about X with a continuous C platter; XYZ on the head"
+default_tool_length = 100.0
+singularity_tolerance_deg = 1.0
+wcs_origin = [0.0, 0.0, 50.0]   # part zero 50 mm above the pivot
+
+[spindle]
+gauge_point = [0.0, 0.0, 450.0]
+direction = [0.0, 0.0, 1.0]
+
+[[axes]]
+name = "X"
+kind = "linear"
+chain = "head"
+direction = [1.0, 0.0, 0.0]
+min = -300.0
+max = 300.0
+max_rate = 24000.0
+
+[[axes]]
+name = "Y"
+kind = "linear"
+chain = "head"
+direction = [0.0, 1.0, 0.0]
+min = -250.0
+max = 250.0
+max_rate = 24000.0
+
+[[axes]]
+name = "Z"
+kind = "linear"
+chain = "head"
+direction = [0.0, 0.0, 1.0]
+min = -420.0
+max = 0.0
+max_rate = 24000.0
+
+[[axes]]
+name = "A"
+kind = "rotary"
+chain = "table"
+direction = [-1.0, 0.0, 0.0]   # +A leans the tool toward -Y relative to the part
+point = [0.0, 0.0, 0.0]
+min = -30.0
+max = 120.0
+max_rate = 9000.0
+
+[[axes]]
+name = "C"
+kind = "rotary"
+chain = "table"
+direction = [0.0, 0.0, -1.0]   # +C turns the tool counter-clockwise about the part (ISO)
+point = [0.0, 0.0, 0.0]
+max_rate = 18000.0             # no limits: continuous

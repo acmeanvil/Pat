@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pat-cam"
+description = "Open-source 3/4/5-axis CAM core: machine kinematics, G-code simulation and posting"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+classifiers = [
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+module-name = "pat"
+features = ["pyo3/extension-module"]

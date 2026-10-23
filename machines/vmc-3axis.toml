@@ -1,0 +1,31 @@
+name = "3-axis VMC"
+description = "Plain vertical machining centre"
+default_tool_length = 80.0
+wcs_origin = [0.0, 0.0, 0.0]
+
+[spindle]
+gauge_point = [0.0, 0.0, 400.0]
+
+[[axes]]
+name = "X"
+kind = "linear"
+chain = "head"
+direction = [1.0, 0.0, 0.0]
+min = -400.0
+max = 400.0
+
+[[axes]]
+name = "Y"
+kind = "linear"
+chain = "head"
+direction = [0.0, 1.0, 0.0]
+min = -250.0
+max = 250.0
+
+[[axes]]
+name = "Z"
+kind = "linear"
+chain = "head"
+direction = [0.0, 0.0, 1.0]
+min = -400.0
+max = 0.0

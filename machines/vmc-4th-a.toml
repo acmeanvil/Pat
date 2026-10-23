@@ -1,0 +1,39 @@
+# 3-axis VMC with a 4th-axis rotary along X (A), part held between centres.
+name = "VMC with 4th axis (A)"
+description = "Continuous rotary on the table with its axis along X; part zero on the rotary axis"
+default_tool_length = 80.0
+wcs_origin = [0.0, 0.0, 0.0]   # part zero on the rotary axis
+
+[spindle]
+gauge_point = [0.0, 0.0, 380.0]
+
+[[axes]]
+name = "X"
+kind = "linear"
+chain = "head"
+direction = [1.0, 0.0, 0.0]
+min = -380.0
+max = 380.0
+
+[[axes]]
+name = "Y"
+kind = "linear"
+chain = "head"
+direction = [0.0, 1.0, 0.0]
+min = -200.0
+max = 200.0
+
+[[axes]]
+name = "Z"
+kind = "linear"
+chain = "head"
+direction = [0.0, 0.0, 1.0]
+min = -380.0
+max = 0.0
+
+[[axes]]
+name = "A"
+kind = "rotary"
+chain = "table"
+direction = [-1.0, 0.0, 0.0]
+point = [0.0, 0.0, 0.0]
