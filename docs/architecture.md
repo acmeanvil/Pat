@@ -70,9 +70,29 @@ capability is already a function with structured input and output.
 
 The posted output is verified by re-simulating it in the tests.
 
-Not yet covered: G68.2 tilted planes, canned cycles, multiple work offsets,
-O-word subroutines, and the controller's own look-ahead and acceleration
-model (cycle times are feed-rate estimates).
+### Milestone 1b: control coverage (done)
+
+- **Work offsets.** G54–G59, G59.1–G59.3, G54.1 Pn and Haas G110–G129, from
+  the machine file's `[work_offsets]` or `--offset NAME=x,y,z`.
+- **Canned cycles.** G73, G81–G86, G88 and G89, with G98/G99 retract,
+  G90/G91 and L/K repeats. Cycles drill along the active plane's Z, so they
+  also work inside G68.2.
+- **Subroutines.** LinuxCNC `oNNN sub/endsub/call/return` (no arguments) and
+  Fanuc/Haas `M98 P… L…` / `M99`, flattened before interpretation. Issues
+  point at lines inside the subroutine.
+- **Tilted planes.** G68.2 P0 (ZXZ Euler) plus G53.1 alignment and G69. A
+  move in the plane without aligning the tool is flagged.
+- **Cycle time.** A look-ahead planner uses per-axis `max_accel` and
+  `max_rate` with GRBL-style junction deviation and trapezoidal velocity
+  profiles. It honours G61/G64/G9 exact stop and falls back to feed-rate
+  arithmetic when acceleration data is missing.
+
+Still not covered:
+- O-word control flow, parameters and expressions;
+- G10 offset setting;
+- G68.3, and G68.2 with P1–P3;
+- G87 back boring and G74 left-hand tapping;
+- jerk limits and servo lag in the time estimate.
 
 ## Roadmap
 

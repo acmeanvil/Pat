@@ -53,6 +53,13 @@ enum Cmd {
         /// Allowed tool-tip deviation on non-TCP rotary moves (mm).
         #[arg(long, default_value_t = 0.01)]
         tip_tolerance: f64,
+        /// Work offset as NAME=X,Y,Z (part zero in the machine base frame),
+        /// e.g. --offset G55=150,0,0 (repeatable).
+        #[arg(long = "offset", value_parser = parse_offset, allow_hyphen_values = true)]
+        offsets: Vec<(String, Vec3)>,
+        /// Read P dwell words as milliseconds (Fanuc / Haas).
+        #[arg(long)]
+        dwell_ms: bool,
         /// Include the machine state after every move.
         #[arg(long)]
         trace: bool,
@@ -107,6 +114,11 @@ fn parse_tool(s: &str) -> Result<(u32, f64), String> {
         n.trim().parse().map_err(|_| "bad tool number")?,
         l.trim().parse().map_err(|_| "bad length")?,
     ))
+}
+
+fn parse_offset(s: &str) -> Result<(String, Vec3), String> {
+    let (n, v) = s.split_once('=').ok_or("expected NAME=X,Y,Z")?;
+    Ok((n.trim().to_ascii_uppercase(), parse_vec3(v)?))
 }
 
 fn parse_vec3(s: &str) -> Result<Vec3, String> {
@@ -189,6 +201,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             tools,
             tool_length,
             tip_tolerance,
+            offsets,
+            dwell_ms,
             trace,
             json,
         } => {
@@ -199,6 +213,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 tool_length,
                 tip_tolerance,
                 record_trace: trace,
+                work_offsets: offsets.into_iter().collect(),
+                dwell_p_milliseconds: dwell_ms,
                 ..Default::default()
             };
             let r = simulate(&m, &src, &opts);
@@ -222,6 +238,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 println!(
                     "{}: {} errors, {} warnings, {} moves, cutting {:.1}s, rapid {:.1}s, cut length {:.1} mm",
                     r.machine, r.errors, r.warnings, r.moves, r.cutting_time_s, r.rapid_time_s, r.cutting_length_mm
+                );
+                println!(
+                    "  cycle time {:.1}s ({} model, dwell {:.1}s)",
+                    r.cycle_time_s, r.cycle_time_model, r.dwell_time_s
                 );
                 for a in &r.axis_ranges {
                     println!("  {:<2} {:>10.3} .. {:<10.3}", a.axis, a.min, a.max);

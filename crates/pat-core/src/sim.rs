@@ -10,18 +10,28 @@
 //! - non-TCP moves whose tool tip strays from a straight line, i.e. the post
 //!   did not linearise enough;
 //! - feed problems (no feed set, missing F in inverse-time mode);
+//! - G68.2 moves made without aligning the tool (missing G53.1);
+//! - undefined work offsets and subroutines;
 //! - unsupported or unknown codes.
 //!
-//! It also estimates cycle time and records axis travel ranges. The output is
-//! plain serialisable data so a UI or an AI agent can consume it directly.
+//! Subroutines are expanded first ([`crate::subs`]); canned cycles, work
+//! offsets and tilted planes are executed as the control would.
+//!
+//! It also estimates cycle time (acceleration-aware when the machine file has
+//! `max_accel` for every axis, see [`crate::planner`]) and records axis travel
+//! ranges. The output is plain serialisable data so a UI or an AI agent can
+//! consume it directly.
 
 use crate::gcode::parse_program;
 use crate::interp::{
-    interpret, ArcCenter, Coords, Event, Feed, Motion, MotionKind, Plane, Severity,
+    interpret, ArcCenter, Coords, Cycle, Event, Feed, InterpOptions, Motion, MotionKind, Plane,
+    Severity, TiltedPlane,
 };
-use crate::kinematics::{KinError, Kinematics};
+use crate::kinematics::{KinError, Kinematics, Pose};
 use crate::machine::MachineDef;
-use crate::math::Vec3;
+use crate::math::{Mat3, Vec3};
+use crate::planner::{plan_time, PlanSeg};
+use crate::subs::expand;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 
@@ -45,6 +55,11 @@ pub struct SimOptions {
     pub record_trace: bool,
     /// Stop recording issues after this many.
     pub max_issues: usize,
+    /// Work offsets (part zero in the base frame, like `wcs_origin`) that
+    /// override or extend the machine file's, e.g. {"G55": [100, 0, 0]}.
+    pub work_offsets: BTreeMap<String, Vec3>,
+    /// Read `P` dwell words as milliseconds (Fanuc / Haas).
+    pub dwell_p_milliseconds: bool,
 }
 
 impl Default for SimOptions {
@@ -58,6 +73,8 @@ impl Default for SimOptions {
             arc_tolerance: 0.002,
             record_trace: false,
             max_issues: 500,
+            work_offsets: BTreeMap::new(),
+            dwell_p_milliseconds: false,
         }
     }
 }
@@ -102,6 +119,11 @@ pub struct Report {
     pub rapid_time_s: f64,
     pub dwell_time_s: f64,
     pub cutting_length_mm: f64,
+    /// Best available total time estimate (seconds).
+    pub cycle_time_s: f64,
+    /// "acceleration" (look-ahead planner) or "feed-rate" (no acceleration
+    /// limits in the machine file).
+    pub cycle_time_model: String,
     pub axis_ranges: Vec<AxisRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<Vec<TracePoint>>,
@@ -116,8 +138,15 @@ pub fn simulate(def: &MachineDef, program: &str, opts: &SimOptions) -> Report {
     match parse_program(program) {
         Err(e) => sim.issue(e.line, Severity::Error, "parse", e.msg),
         Ok(blocks) => {
+            let (blocks, errors) = expand(&blocks);
+            for e in errors {
+                sim.issue(e.line, Severity::Error, "subroutine", e.msg);
+            }
             let names: Vec<String> = def.axes.iter().map(|a| a.name.clone()).collect();
-            for ev in interpret(&blocks, &names) {
+            let iopts = InterpOptions {
+                dwell_p_milliseconds: opts.dwell_p_milliseconds,
+            };
+            for ev in interpret(&blocks, &names, &iopts) {
                 sim.event(ev);
             }
         }
@@ -141,6 +170,19 @@ struct Sim<'a> {
     lo: Vec<f64>,
     hi: Vec<f64>,
     trace: Option<Vec<TracePoint>>,
+    tool_length: f64,
+    wcs: String,
+    plan: Vec<PlanSeg>,
+    stop_next: bool,
+    cycle_initial: Option<f64>,
+}
+
+/// Rotation of a G68.2 frame: intrinsic Z-X-Z Euler angles.
+fn tilt_rotation(p: &TiltedPlane) -> Mat3 {
+    let e = p.euler_deg;
+    Mat3::rotation(Vec3::Z, e.x.to_radians())
+        .mul_mat(&Mat3::rotation(Vec3::X, e.y.to_radians()))
+        .mul_mat(&Mat3::rotation(Vec3::Z, e.z.to_radians()))
 }
 
 impl<'a> Sim<'a> {
@@ -162,16 +204,56 @@ impl<'a> Sim<'a> {
             lo: vec![f64::INFINITY; n],
             hi: vec![f64::NEG_INFINITY; n],
             trace: opts.record_trace.then(Vec::new),
+            tool_length: opts.tool_length.unwrap_or(def.default_tool_length),
+            wcs: "G54".into(),
+            plan: Vec::new(),
+            stop_next: true,
+            cycle_initial: None,
         };
-        let len = opts.tool_length.unwrap_or(def.default_tool_length);
-        s.set_tool_length(0, len);
+        s.rebuild_kinematics(0);
         s
     }
 
-    fn set_tool_length(&mut self, line: usize, len: f64) {
-        match Kinematics::new(self.def.clone(), len) {
+    fn work_offset(&self, name: &str) -> Option<Vec3> {
+        let key = name.to_ascii_uppercase();
+        self.opts
+            .work_offsets
+            .iter()
+            .find(|(k, _)| k.to_ascii_uppercase() == key)
+            .map(|(_, v)| *v)
+            .or_else(|| self.def.work_offset(name))
+    }
+
+    /// Rebuild kinematics for the current tool length and work offset.
+    fn rebuild_kinematics(&mut self, line: usize) {
+        let origin = match self.work_offset(&self.wcs) {
+            Some(o) => o,
+            None => {
+                let name = self.wcs.clone();
+                self.issue(
+                    line,
+                    Severity::Error,
+                    "work_offset",
+                    format!("work offset {name} is not defined in the machine file or options; using G54"),
+                );
+                self.def.wcs_origin
+            }
+        };
+        match Kinematics::new(self.def.with_wcs(origin), self.tool_length) {
             Ok(k) => self.kin = Some(k),
             Err(e) => self.issue(line, Severity::Error, "kinematics", e.to_string()),
+        }
+    }
+
+    fn set_tool_length(&mut self, line: usize, len: f64) {
+        self.tool_length = len;
+        self.rebuild_kinematics(line);
+    }
+
+    fn select_wcs(&mut self, line: usize, wcs: &str) {
+        if wcs != self.wcs {
+            self.wcs = wcs.to_string();
+            self.rebuild_kinematics(line);
         }
     }
 
@@ -219,9 +301,52 @@ impl<'a> Sim<'a> {
                 };
                 self.set_tool_length(line, len);
             }
-            Event::Dwell { seconds, .. } => self.dwell_s += seconds,
-            Event::End { .. } => {}
-            Event::Motion(m) => self.motion(m),
+            Event::Dwell { seconds, .. } => {
+                self.dwell_s += seconds;
+                self.stop_next = true;
+            }
+            Event::Stop { .. } | Event::End { .. } => self.stop_next = true,
+            Event::Motion(m) => {
+                self.select_wcs(m.line, &m.wcs.clone());
+                self.motion(m);
+            }
+            Event::Cycle(c) => {
+                self.select_wcs(c.line, &c.wcs.clone());
+                self.cycle(c);
+            }
+            Event::AlignToolAxis { line, plane } => self.align_tool(line, &plane),
+        }
+    }
+
+    /// G53.1: turn the rotaries so the tool axis matches the plane normal.
+    fn align_tool(&mut self, line: usize, plane: &TiltedPlane) {
+        let Some(kin) = self.kin.clone() else { return };
+        let want = tilt_rotation(plane).mul_vec(Vec3::Z);
+        let tip = kin.forward(&self.q).tip;
+        match kin.inverse(&Pose { tip, axis: want }, Some(&self.q)) {
+            Ok(sol) => {
+                let mut axes = vec![None; self.q.len()];
+                for &i in kin.rotary_axes() {
+                    axes[i] = Some(sol.joints[i]);
+                }
+                let m = Motion {
+                    line,
+                    kind: MotionKind::Rapid,
+                    axes,
+                    incremental: false,
+                    coords: Coords::Machine,
+                    wcs: self.wcs.clone(),
+                    feed: Feed::Missing,
+                    exact_stop: true,
+                };
+                self.motion(m);
+            }
+            Err(e) => self.issue(
+                line,
+                Severity::Error,
+                "tilted_plane",
+                format!("G53.1 cannot align the tool with the plane: {e}"),
+            ),
         }
     }
 
@@ -230,8 +355,11 @@ impl<'a> Sim<'a> {
         match mode {
             Coords::Machine => q.to_vec(),
             Coords::Program => kin.to_program(q),
-            Coords::Tcp => {
-                let tip = kin.forward(q).tip;
+            Coords::Tcp | Coords::Tilted(_) => {
+                let mut tip = kin.forward(q).tip;
+                if let Coords::Tilted(p) = mode {
+                    tip = tilt_rotation(&p).transpose().mul_vec(tip - p.origin);
+                }
                 let mut m = q.to_vec();
                 for (k, &i) in kin.linear_axes().iter().enumerate() {
                     m[i] = tcp_component(&self.def.axes[i].name, tip, k);
@@ -251,7 +379,7 @@ impl<'a> Sim<'a> {
         match mode {
             Coords::Machine => Ok(m.to_vec()),
             Coords::Program => Ok(kin.to_machine(m)),
-            Coords::Tcp => {
+            Coords::Tcp | Coords::Tilted(_) => {
                 let mut tip = Vec3::ZERO;
                 for &i in &kin.linear_axes() {
                     match self.def.axes[i].name.as_str() {
@@ -260,6 +388,9 @@ impl<'a> Sim<'a> {
                         _ => tip.z = m[i],
                     }
                 }
+                if let Coords::Tilted(p) = mode {
+                    tip = tilt_rotation(&p).mul_vec(tip) + p.origin;
+                }
                 kin.solve_linear(m, tip).ok_or(KinError::LinearSingular)
             }
         }
@@ -267,6 +398,18 @@ impl<'a> Sim<'a> {
 
     fn motion(&mut self, m: Motion) {
         let Some(kin) = self.kin.clone() else { return };
+        if let Coords::Tilted(p) = m.coords {
+            let normal = tilt_rotation(&p).mul_vec(Vec3::Z);
+            let off = kin.forward(&self.q).axis.angle_to(normal).to_degrees();
+            if off > 0.01 {
+                self.issue(
+                    m.line,
+                    Severity::Warning,
+                    "tilted_plane",
+                    format!("tool axis is {off:.2}° off the G68.2 plane normal; missing G53.1?"),
+                );
+            }
+        }
         let start = self.mode_coords(&kin, m.coords, &self.q);
 
         let mut end = start.clone();
@@ -320,6 +463,129 @@ impl<'a> Sim<'a> {
             prev_m = p;
         }
         self.moves += 1;
+        if m.exact_stop {
+            self.stop_next = true;
+        }
+    }
+
+    /// Execute a drilling cycle as the control would, in the block's
+    /// coordinate mode (so it also drills along a G68.2 plane's Z).
+    fn cycle(&mut self, c: Cycle) {
+        let Some(kin) = self.kin.clone() else { return };
+        let Some(zi) = self.def.axis_index("Z") else {
+            return;
+        };
+        let here = self.mode_coords(&kin, c.coords, &self.q);
+        if c.first || self.cycle_initial.is_none() {
+            self.cycle_initial = Some(here[zi]);
+        }
+        let initial = self.cycle_initial.unwrap_or(here[zi]);
+        let r_level = if c.incremental { initial + c.r } else { c.r };
+        let bottom = if c.incremental { r_level + c.z } else { c.z };
+        if bottom > r_level {
+            self.issue(
+                c.line,
+                Severity::Warning,
+                "canned_cycle",
+                "hole bottom is above the R plane".into(),
+            );
+        }
+        let clear = if c.retract_to_r {
+            r_level
+        } else {
+            initial.max(r_level)
+        };
+        let n_axes = self.q.len();
+
+        let mv = |sim: &mut Self, kind: MotionKind, target: Vec<Option<f64>>| {
+            let m = Motion {
+                line: c.line,
+                feed: if kind == MotionKind::Rapid {
+                    Feed::Missing
+                } else {
+                    c.feed
+                },
+                kind,
+                axes: target,
+                incremental: false,
+                coords: c.coords,
+                wcs: c.wcs.clone(),
+                exact_stop: true,
+            };
+            sim.motion(m);
+        };
+        let z_to = |z: f64| {
+            let mut a = vec![None; n_axes];
+            a[zi] = Some(z);
+            a
+        };
+        let dwell = |sim: &mut Self, s: f64| {
+            sim.dwell_s += s;
+            sim.stop_next = true;
+        };
+
+        for _ in 0..c.repeats.max(1) {
+            let cur = self.mode_coords(&kin, c.coords, &self.q);
+            if cur[zi] < r_level {
+                mv(self, MotionKind::Rapid, z_to(r_level));
+            }
+            let cur = self.mode_coords(&kin, c.coords, &self.q);
+            let mut pos = vec![None; n_axes];
+            for (i, v) in c.axes.iter().enumerate() {
+                if let Some(v) = v {
+                    pos[i] = Some(if c.incremental { cur[i] + v } else { *v });
+                }
+            }
+            if pos.iter().any(|p| p.is_some()) {
+                mv(self, MotionKind::Rapid, pos);
+            }
+            mv(self, MotionKind::Rapid, z_to(r_level));
+            match c.kind {
+                73 | 83 => {
+                    let q = c.q.unwrap_or(r_level - bottom).max(1e-3);
+                    let clearance = 0.254_f64.min(q * 0.5);
+                    let mut depth = r_level;
+                    while depth > bottom + 1e-9 {
+                        let next = (depth - q).max(bottom);
+                        if c.kind == 83 && depth < r_level {
+                            mv(self, MotionKind::Rapid, z_to(depth + clearance));
+                        }
+                        mv(self, MotionKind::Linear, z_to(next));
+                        if next > bottom + 1e-9 {
+                            if c.kind == 83 {
+                                mv(self, MotionKind::Rapid, z_to(r_level));
+                            } else {
+                                mv(self, MotionKind::Rapid, z_to(next + clearance));
+                            }
+                        }
+                        depth = next;
+                    }
+                }
+                _ => mv(self, MotionKind::Linear, z_to(bottom)),
+            }
+            match c.kind {
+                82 | 88 | 89 => dwell(self, c.dwell_s),
+                84 => dwell(self, c.dwell_s),
+                _ => {}
+            }
+            match c.kind {
+                84 | 85 | 89 => mv(self, MotionKind::Linear, z_to(r_level)),
+                86 | 88 => self.stop_next = true,
+                _ => {}
+            }
+            if c.kind == 88 {
+                self.issue(
+                    c.line,
+                    Severity::Info,
+                    "canned_cycle",
+                    "G88 manual retract simulated as a rapid".into(),
+                );
+            }
+            let cur = self.mode_coords(&kin, c.coords, &self.q);
+            if (cur[zi] - clear).abs() > 1e-9 {
+                mv(self, MotionKind::Rapid, z_to(clear));
+            }
+        }
     }
 
     fn segment(
@@ -358,6 +624,7 @@ impl<'a> Sim<'a> {
         let mut min_sing = f64::INFINITY;
         let mut tip_len = 0.0;
         let mut prev_tip = tip_a;
+        let mut samples: Vec<Vec<f64>> = Vec::with_capacity(n);
 
         for k in 1..=n {
             let t = k as f64 / n as f64;
@@ -379,6 +646,7 @@ impl<'a> Sim<'a> {
                 }
             };
             self.check_limits(line, &q);
+            samples.push(q.clone());
             let pose = kin.forward(&q);
             if let Some(s) = kin.singularity_angle_deg(pose.axis) {
                 min_sing = min_sing.min(s);
@@ -436,7 +704,7 @@ impl<'a> Sim<'a> {
         }
 
         // Time.
-        if rapid {
+        let seg_s = if rapid {
             let t = (0..qa.len())
                 .map(|i| {
                     let ax = &self.def.axes[i];
@@ -449,6 +717,7 @@ impl<'a> Sim<'a> {
                 })
                 .fold(0.0, f64::max);
             self.rapid_s += t * 60.0;
+            t * 60.0
         } else {
             let minutes = match m.feed {
                 Feed::InverseTime(f) if f > 0.0 => 1.0 / f / segs,
@@ -473,6 +742,20 @@ impl<'a> Sim<'a> {
             };
             self.cut_s += minutes * 60.0;
             self.cut_len += tip_len;
+            minutes * 60.0
+        };
+
+        // Joint-space pieces for the cycle-time planner.
+        let mut prev_q = qa.clone();
+        for q in &samples {
+            let dq: Vec<f64> = q.iter().zip(&prev_q).map(|(b, a)| b - a).collect();
+            let stop_before = std::mem::take(&mut self.stop_next);
+            self.plan.push(PlanSeg {
+                dq,
+                nominal_s: seg_s / samples.len() as f64,
+                stop_before,
+            });
+            prev_q = q.clone();
         }
 
         if let Some(tr) = self.trace.as_mut() {
@@ -547,8 +830,15 @@ impl<'a> Sim<'a> {
                 limit_max: a.max,
             })
             .collect();
+        let feed_total = self.cut_s + self.rapid_s + self.dwell_s;
+        let (cycle_time_s, cycle_time_model) = match plan_time(self.def, &self.plan) {
+            Some(t) => (t + self.dwell_s, "acceleration".to_string()),
+            None => (feed_total, "feed-rate".to_string()),
+        };
         Report {
             machine: self.def.name.clone(),
+            cycle_time_s,
+            cycle_time_model,
             ok: errors == 0,
             errors,
             warnings,

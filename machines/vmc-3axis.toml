@@ -2,6 +2,12 @@ name = "3-axis VMC"
 description = "Plain vertical machining centre"
 default_tool_length = 80.0
 wcs_origin = [0.0, 0.0, 0.0]
+junction_deviation = 0.02
+
+# Extra fixtures: part zero for G55 / G56 (machine base frame, all axes home).
+[work_offsets]
+G55 = [150.0, 0.0, 0.0]
+G56 = [-150.0, 0.0, 0.0]
 
 [spindle]
 gauge_point = [0.0, 0.0, 400.0]
@@ -13,6 +19,8 @@ chain = "head"
 direction = [1.0, 0.0, 0.0]
 min = -400.0
 max = 400.0
+max_rate = 30000.0
+max_accel = 4000.0
 
 [[axes]]
 name = "Y"
@@ -21,6 +29,8 @@ chain = "head"
 direction = [0.0, 1.0, 0.0]
 min = -250.0
 max = 250.0
+max_rate = 30000.0
+max_accel = 4000.0
 
 [[axes]]
 name = "Z"
@@ -29,3 +39,5 @@ chain = "head"
 direction = [0.0, 0.0, 1.0]
 min = -400.0
 max = 0.0
+max_rate = 24000.0
+max_accel = 4000.0

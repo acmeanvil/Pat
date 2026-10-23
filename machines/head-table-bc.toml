@@ -14,6 +14,8 @@ chain = "head"
 direction = [1.0, 0.0, 0.0]
 min = -600.0
 max = 600.0
+max_rate = 30000.0
+max_accel = 4000.0
 
 [[axes]]
 name = "Y"
@@ -22,6 +24,8 @@ chain = "table"
 direction = [0.0, -1.0, 0.0]   # the table moves; +Y moves it toward the operator
 min = -400.0
 max = 400.0
+max_rate = 30000.0
+max_accel = 4000.0
 
 [[axes]]
 name = "Z"
@@ -30,6 +34,8 @@ chain = "head"
 direction = [0.0, 0.0, 1.0]
 min = -500.0
 max = 100.0
+max_rate = 30000.0
+max_accel = 4000.0
 
 [[axes]]
 name = "B"
@@ -39,6 +45,8 @@ direction = [0.0, 1.0, 0.0]
 point = [0.0, 0.0, 580.0]
 min = -110.0
 max = 110.0
+max_rate = 6000.0
+max_accel = 2000.0
 
 [[axes]]
 name = "C"
@@ -46,3 +54,5 @@ kind = "rotary"
 chain = "table"
 direction = [0.0, 0.0, -1.0]
 point = [0.0, 0.0, 0.0]
+max_rate = 9000.0
+max_accel = 3000.0

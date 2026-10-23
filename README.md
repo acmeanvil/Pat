@@ -13,7 +13,8 @@ the same engine works from the command line or any Python environment.
 
 **Status: milestone 1 of 6, the kinematics and verification foundation.**
 It covers machine models, forward and inverse kinematics, a G-code simulator
-and a multi-axis post. See [docs/architecture.md](docs/architecture.md) for the
+and a multi-axis post. The simulator handles work offsets, canned cycles,
+subroutines, G68.2 tilted planes and acceleration-aware cycle time. See [docs/architecture.md](docs/architecture.md) for the
 design and roadmap, and
 [reports/CAM software landscape survey.md](reports/CAM%20software%20landscape%20survey.md)
 for the market research behind it.
@@ -45,7 +46,9 @@ cargo run -- check examples/bad-trunnion.ngc -m machines/trunnion-ac.toml --tool
 cargo run -- ik -m machines/trunnion-ac.toml --tip 0,0,0 --axis 0,0.5,0.866 --tool-length 100
 ```
 
-Add `--json` to `check` or `machine` for machine-readable output.
+Add `--json` to `check` or `machine` for machine-readable output. Use
+`--offset G55=x,y,z` for work offsets not in the machine file, and
+`--dwell-ms` for Fanuc-style millisecond `P` dwells.
 
 ### Python
 

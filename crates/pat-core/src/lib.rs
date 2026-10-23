@@ -18,8 +18,10 @@ pub mod interp;
 pub mod kinematics;
 pub mod machine;
 pub mod math;
+pub mod planner;
 pub mod post;
 pub mod sim;
+pub mod subs;
 
 pub use kinematics::{IkSolution, Kinematics, Pose};
 pub use machine::MachineDef;

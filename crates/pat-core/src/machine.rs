@@ -25,7 +25,7 @@
 
 use crate::math::Vec3;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +61,10 @@ pub struct AxisDef {
     /// Rapid rate in mm/min or deg/min. Used for cycle-time estimates.
     #[serde(default)]
     pub max_rate: Option<f64>,
+    /// Acceleration limit in mm/s² or deg/s². When every axis has one, cycle
+    /// time is estimated with an acceleration-limited look-ahead planner.
+    #[serde(default)]
+    pub max_accel: Option<f64>,
 }
 
 impl AxisDef {
@@ -108,6 +112,20 @@ pub struct MachineDef {
     /// reported as near-singular.
     #[serde(default = "default_singularity_tol")]
     pub singularity_tolerance_deg: f64,
+    /// Extra work offsets by name ("G55", "G59.1", "G54.1P3", "G110", …):
+    /// part zero in the base frame with all axes home, like `wcs_origin`
+    /// (which is G54).
+    #[serde(default)]
+    pub work_offsets: BTreeMap<String, Vec3>,
+    /// Look-ahead cornering tolerance (mm) for the cycle-time planner: how far
+    /// the control may round a corner to keep speed (GRBL-style junction
+    /// deviation).
+    #[serde(default = "default_junction_deviation")]
+    pub junction_deviation: f64,
+}
+
+fn default_junction_deviation() -> f64 {
+    0.02
 }
 
 #[derive(Debug, Error)]
@@ -186,6 +204,19 @@ impl MachineDef {
                 "at most 2 rotary axes are supported, found {rotary}"
             )));
         }
+        if let Some(a) = self
+            .axes
+            .iter()
+            .find(|a| a.max_accel.is_some_and(|v| v <= 0.0))
+        {
+            return Err(invalid(format!(
+                "axis '{}' max_accel must be positive",
+                a.name
+            )));
+        }
+        if self.junction_deviation < 0.0 {
+            return Err(invalid("junction_deviation must not be negative".into()));
+        }
         if self.spindle.direction.normalized().is_none() {
             return Err(invalid("spindle direction is zero".into()));
         }
@@ -205,6 +236,26 @@ impl MachineDef {
 
     pub fn rotary_count(&self) -> usize {
         self.axes.iter().filter(|a| a.is_rotary()).count()
+    }
+
+    /// Part zero for a work offset name; G54 is `wcs_origin`.
+    pub fn work_offset(&self, name: &str) -> Option<Vec3> {
+        let key = name.to_ascii_uppercase();
+        if key == "G54" {
+            return Some(self.wcs_origin);
+        }
+        self.work_offsets
+            .iter()
+            .find(|(k, _)| k.to_ascii_uppercase() == key)
+            .map(|(_, v)| *v)
+    }
+
+    /// Copy of this machine with part zero moved to `origin`.
+    pub fn with_wcs(&self, origin: Vec3) -> MachineDef {
+        MachineDef {
+            wcs_origin: origin,
+            ..self.clone()
+        }
     }
 
     pub fn to_toml(&self) -> String {
