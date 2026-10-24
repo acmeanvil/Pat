@@ -234,21 +234,69 @@ Known limits:
 - With 3+2 or indexed roughing on a 4th axis, model the chuck and tailstock
   as fixtures to protect the held stock.
 
+## Milestone 5: simultaneous 5-axis finishing (done)
+
+- **Exact ball drop-cutter** (`geom::sphere_drop_triangle`): face, edge and
+  vertex contact along any direction. The ball centre is gouge-free by
+  construction, so the tool axis is free to choose.
+- **Surface finishing** (`fiveaxis::surface_finish`): a zig-zag pattern in any
+  projection frame and pass angle, dropped onto the part.
+  - **Tool-axis control** (`AxisControl`): fixed, surface normal with lead
+    and tilt, toward or from a point, toward or from a line.
+  - **Feasibility** of each axis:
+    - the machine reaches it within limits, continuing from the previous
+      point, with rotary flips rejected;
+    - with a scene, the shank, holder, head and the cutter's side above the
+      ball (new `MoveClass::Finish`) clear the part, fixtures and machine.
+  - **Avoidance.** When an axis fails, rings of increasing tilt are searched
+    around the preferred axis, keeping the ball centre fixed and preferring
+    continuity.
+  - **Singularity lock.** Near the singular direction, the primary rotary is
+    held and only the other rotary is solved (`Kinematics::inverse_locked`).
+  - **Branch changes.** Where limits force another rotary branch, the pass
+    breaks for a retract and rotate instead of dropping points.
+  - **Smoothing and densifying.** Axes are smoothed and re-checked, and
+    midpoints between points are checked. Points are inserted wherever the
+    axis turns more than 5°, so the straight-line tip motion between points
+    cannot sag the ball into the part.
+  - **Transitions.** The tool backs out along its axis, travels upright above
+    the part *and* fixtures, turns to the next start axis and comes back down
+    along it.
+- **Swarf** (`fiveaxis::swarf`): flank milling of a ruled wall from two rails.
+  - The axis follows the rulings and the tool is offset by its radius toward
+    the chosen side.
+  - It supports depth passes, leave, tip offset, lead in and out, and station
+    reachability and collision checks.
+  - It reports the deviation between stations (zero for developable walls).
+- **Front ends.** `pat surface` and `pat swarf`; Python `surface` and
+  `swarf_wall`. Examples: `examples/bump-5axis.toml` and
+  `examples/wall-rails.json`.
+
+Verified by posting (G43.4 TCP) and replaying on the trunnion with its
+spindle housing, cradle and platter, with collision and stock simulation.
+Normal-plus-lead finishing over a bump and avoidance around a tall clamp
+replay with zero gouges or collisions, and swarf on a sloped wall has zero
+deviation and never enters the part.
+
+Known limits:
+- Surface finishing is ball-end only.
+- Patterns are zig-zag only (no flowline / UV patterns yet; meshes carry no
+  surface parameterisation).
+- Swarf needs its rails supplied. Detecting ruled walls from meshes is left
+  for the Fusion adapter, which has the B-rep edges.
+- Passing close to the singular direction between points can still swing C
+  quickly; the simulator flags these moves.
+
 ## Roadmap
 
-1. **5-axis finishing.**
-   - Swarf, multi-axis flowline and surface-normal strategies with lead/lag and
-     tilt control.
-   - Tool-axis smoothing.
-   - One application pack: port machining is the first candidate.
-2. **AI agent integration.**
+1. **AI agent integration.**
    - An MCP server exposing `machine`, `check`, `post`, `ik`, and later `plan`,
      `collide` and `reach` as tools.
    - The agent proposes setups and orientations, and explains simulator
      findings in shop terms.
    - The agent never bypasses verification: every agent-produced program goes
      through `check`.
-3. **Fusion adapter.**
+2. **Fusion adapter.**
    - The add-in reads the machine definition (`adsk.cam.Machine`), BRep/mesh,
      stock and tools.
    - It runs `pat` through the Python wheel and previews toolpaths with custom

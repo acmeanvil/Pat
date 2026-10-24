@@ -19,6 +19,7 @@
 
 use pat_core::access::{cap_directions, reachable_directions, tilt_to_avoid, TiltOptions};
 use pat_core::collision::{Role, SceneDef, World};
+use pat_core::fiveaxis::{surface_finish, swarf, SurfaceParams, SwarfParams};
 use pat_core::geom::Mesh;
 use pat_core::math::Vec3;
 use pat_core::orient::{select_orientations, OrientOptions};
@@ -328,6 +329,88 @@ fn wrap_paths(
     .map_err(err)
 }
 
+/// 5-axis surface finishing with a ball end mill. `params_json` overrides
+/// SurfaceParams fields (including "axis": {"control": {...}}); the cutter
+/// comes from the tool. Returns {"cl", "summary"}.
+#[pyfunction]
+#[pyo3(signature = (machine_src, scene_toml, tool, params_json=None, scene_dir=None, machine_dir=None))]
+fn surface(
+    machine_src: &str,
+    scene_toml: &str,
+    tool: u32,
+    params_json: Option<&str>,
+    scene_dir: Option<&str>,
+    machine_dir: Option<&str>,
+) -> PyResult<String> {
+    let m = machine(machine_src)?;
+    let w = world(&m, Some(scene_toml), scene_dir, machine_dir)?;
+    let asm = w
+        .tool(tool)
+        .ok_or_else(|| err(format!("tool T{tool} is not in the scene")))?;
+    let cutter = asm
+        .cutter_shape()
+        .ok_or_else(|| err(format!("tool T{tool} has no cutter section")))?;
+    let k = kin_for_tool(&m, &w, tool)?;
+    let mut sp: SurfaceParams = opts(params_json)?;
+    sp.cutter = cutter;
+    let parts: Vec<&Mesh> = w
+        .table_meshes(Role::Part)
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    let r = surface_finish(&parts, &k, Some(&w), Some(tool), m.wcs_origin, &sp);
+    let cl = ClProgram {
+        name: format!("5-axis surface T{tool}"),
+        tool: ClTool {
+            number: tool,
+            length: asm.def.gauge_length,
+            diameter: Some(cutter.radius * 2.0),
+        },
+        spindle_rpm: None,
+        coolant: true,
+        moves: r.moves.clone(),
+    };
+    let summary = serde_json::json!({ "summary": r.summary, "points": r.points, "adjusted": r.adjusted, "skipped": r.skipped, "max_axis_step_deg": r.max_axis_step_deg, "warnings": r.warnings });
+    serde_json::to_string(&serde_json::json!({ "cl": cl, "summary": summary })).map_err(err)
+}
+
+/// Swarf milling of the ruled wall between `bottom` and `top` rails (lists
+/// of [x, y, z] in WCS). `params_json` overrides SwarfParams fields. With a
+/// scene, the tool comes from it and stations are collision checked.
+#[pyfunction]
+#[pyo3(signature = (machine_src, bottom, top, params_json=None, scene_toml=None, tool=None, scene_dir=None, machine_dir=None))]
+#[allow(clippy::too_many_arguments)]
+fn swarf_wall(
+    machine_src: &str,
+    bottom: Vec<[f64; 3]>,
+    top: Vec<[f64; 3]>,
+    params_json: Option<&str>,
+    scene_toml: Option<&str>,
+    tool: Option<u32>,
+    scene_dir: Option<&str>,
+    machine_dir: Option<&str>,
+) -> PyResult<String> {
+    let m = machine(machine_src)?;
+    let mut sp: SwarfParams = opts(params_json)?;
+    let w = match scene_toml {
+        Some(s) => Some(world(&m, Some(s), scene_dir, machine_dir)?),
+        None => None,
+    };
+    let mut len = m.default_tool_length;
+    if let (Some(w), Some(t)) = (&w, tool) {
+        if let Some(a) = w.tool(t) {
+            if let Some(c) = a.cutter_shape() {
+                sp.cutter = c;
+            }
+            len = a.def.gauge_length;
+        }
+    }
+    let k = Kinematics::new(m.clone(), len).map_err(err)?;
+    let b: Vec<Vec3> = bottom.into_iter().map(Vec3::from).collect();
+    let t: Vec<Vec3> = top.into_iter().map(Vec3::from).collect();
+    serde_json::to_string(&swarf(&b, &t, &k, w.as_ref(), tool, m.wcs_origin, &sp)).map_err(err)
+}
+
 /// Reachability map: directions within `cone_deg` of `axis` and whether
 /// each reaches `tip` without collision.
 #[pyfunction]
@@ -410,6 +493,8 @@ fn pat_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rough, m)?)?;
     m.add_function(wrap_pyfunction!(rotary, m)?)?;
     m.add_function(wrap_pyfunction!(wrap_paths, m)?)?;
+    m.add_function(wrap_pyfunction!(surface, m)?)?;
+    m.add_function(wrap_pyfunction!(swarf_wall, m)?)?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(inverse, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

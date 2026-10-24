@@ -362,6 +362,40 @@ impl Kinematics {
             .ok_or(KinError::NoSolutionInLimits)
     }
 
+    /// Inverse kinematics with the primary rotary (the one that becomes
+    /// undefined at the singularity) held at its value in `prev`. The other
+    /// rotary takes the angle that brings the tool axis closest to the one
+    /// asked for, and the linear axes put the tip on `pose.tip`. Used to pass
+    /// near the singularity without the primary rotary spinning.
+    pub fn inverse_locked(&self, pose: &Pose, prev: &[f64]) -> Option<IkSolution> {
+        if self.rot_seq.len() < 2 {
+            return self.inverse(pose, Some(prev)).ok();
+        }
+        let v = pose.axis.normalized()?;
+        let (i1, s1) = self.rot_seq[0];
+        let (i2, s2) = self.rot_seq[1];
+        let a1 = self.def.axes[i1].direction;
+        let a2 = self.def.axes[i2].direction;
+        let z0 = self.def.spindle.direction;
+        // Undo the locked first rotation, then the closest angle for the second.
+        let phi1 = s1 * prev[i1].to_radians();
+        let target = Mat3::rotation(a1, -phi1).mul_vec(v);
+        let phi2 = subproblem1(a2, z0, target)?;
+        let mut q = prev.to_vec();
+        let deg2 = s2 * phi2.to_degrees();
+        q[i2] = self
+            .wrap_candidates(i2, deg2, Some(prev[i2]))
+            .into_iter()
+            .min_by(|a, b| (a - prev[i2]).abs().total_cmp(&(b - prev[i2]).abs()))?;
+        let q = self.solve_linear(&q, pose.tip)?;
+        let within_limits = self.limit_violations(&q).is_empty();
+        Some(IkSolution {
+            joints: q,
+            within_limits,
+            singular: true,
+        })
+    }
+
     /// Rotary angle branches (degrees, in `rot_seq` order) for tool axis `v`.
     fn solve_rotary(
         &self,

@@ -16,6 +16,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use pat_core::access::{cap_directions, reachable_directions, tilt_to_avoid, TiltOptions};
 use pat_core::collision::{Role, SceneDef, World};
+use pat_core::fiveaxis::{
+    surface_finish, swarf, AxisControl, AxisOptions, Side, SurfaceParams, SwarfParams,
+};
 use pat_core::interp::Severity;
 use pat_core::math::Vec3;
 use pat_core::orient::{select_orientations, OrientOptions};
@@ -224,6 +227,89 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = DialectArg::LinuxcncJoint)]
         dialect: DialectArg,
     },
+    /// 5-axis surface finishing with a ball end mill and tool-axis control.
+    Surface {
+        #[arg(short, long)]
+        machine: PathBuf,
+        #[arg(long)]
+        scene: PathBuf,
+        #[arg(long)]
+        tool: u32,
+        #[arg(long, value_enum, default_value_t = AxisMode::Normal)]
+        axis_mode: AxisMode,
+        /// Lead angle toward the direction of travel (normal mode, degrees).
+        #[arg(long, default_value_t = 10.0)]
+        lead: f64,
+        /// Side tilt (normal mode, degrees).
+        #[arg(long, default_value_t = 0.0)]
+        tilt: f64,
+        /// Axis (fixed mode), or the line direction (line modes).
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true, default_value = "0,0,1")]
+        direction: Vec3,
+        /// Focus point (point and line modes, WCS).
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true, default_value = "0,0,0")]
+        point: Vec3,
+        /// Don't tilt away from collisions (fail instead).
+        #[arg(long)]
+        no_avoid: bool,
+        #[arg(long, default_value_t = 0.5)]
+        stepover: f64,
+        #[arg(long, default_value_t = 0.5)]
+        step: f64,
+        /// Pass direction in the projection plane (degrees).
+        #[arg(long, default_value_t = 0.0)]
+        angle: f64,
+        /// Pattern projection direction (WCS).
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true, default_value = "0,0,1")]
+        projection: Vec3,
+        #[arg(long, default_value_t = 0.0)]
+        leave: f64,
+        #[arg(long, default_value_t = 1500.0)]
+        feed: f64,
+        #[arg(long, default_value_t = 15000.0)]
+        rpm: f64,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        gcode: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = DialectArg::FanucTcp)]
+        dialect: DialectArg,
+    },
+    /// 5-axis swarf (flank) milling of a ruled wall. Rails JSON:
+    /// {"bottom": [[x,y,z], ...], "top": [[x,y,z], ...]} in WCS.
+    Swarf {
+        rails: PathBuf,
+        #[arg(short, long)]
+        machine: PathBuf,
+        /// Scene for tool geometry and collision checks.
+        #[arg(long)]
+        scene: Option<PathBuf>,
+        #[arg(long)]
+        tool: u32,
+        /// Cutter diameter when no scene gives the tool.
+        #[arg(long, default_value_t = 10.0)]
+        diameter: f64,
+        #[arg(long, value_enum, default_value_t = SideArg::Left)]
+        side: SideArg,
+        #[arg(long, default_value_t = 1)]
+        passes: usize,
+        #[arg(long, default_value_t = 5.0)]
+        depth_step: f64,
+        #[arg(long, default_value_t = 0.0)]
+        leave: f64,
+        #[arg(long, default_value_t = 0.0)]
+        tip_offset: f64,
+        #[arg(long, default_value_t = 1000.0)]
+        feed: f64,
+        #[arg(long, default_value_t = 10000.0)]
+        rpm: f64,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        gcode: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = DialectArg::FanucTcp)]
+        dialect: DialectArg,
+    },
     /// Reachability map: which tool directions around an axis reach a point.
     Reach {
         #[arg(short, long)]
@@ -278,6 +364,28 @@ enum Cmd {
         #[arg(long)]
         tool_length: Option<f64>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum AxisMode {
+    Normal,
+    Fixed,
+    TowardPoint,
+    FromPoint,
+    TowardLine,
+    FromLine,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SideArg {
+    Left,
+    Right,
+}
+
+#[derive(serde::Deserialize)]
+struct Rails {
+    bottom: Vec<Vec3>,
+    top: Vec<Vec3>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -866,6 +974,164 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 spindle_rpm: None,
                 coolant: false,
                 moves,
+            };
+            emit_program(&m, &cl, output, gcode, dialect)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Surface {
+            machine,
+            scene,
+            tool,
+            axis_mode,
+            lead,
+            tilt,
+            direction,
+            point,
+            no_avoid,
+            stepover,
+            step,
+            angle,
+            projection,
+            leave,
+            feed,
+            rpm,
+            output,
+            gcode,
+            dialect,
+        } => {
+            let m = load_machine(&machine)?;
+            let world = load_world(&machine, &m, Some(&scene))?;
+            let asm = world
+                .tool(tool)
+                .ok_or_else(|| format!("tool T{tool} is not in the scene"))?;
+            let cutter = asm
+                .cutter_shape()
+                .ok_or_else(|| format!("tool T{tool} has no cutter section"))?;
+            let k = Kinematics::new(m.clone(), asm.def.gauge_length).map_err(|e| e.to_string())?;
+            let parts: Vec<&pat_core::geom::Mesh> = world
+                .table_meshes(Role::Part)
+                .into_iter()
+                .map(|(_, mesh)| mesh)
+                .collect();
+            let control = match axis_mode {
+                AxisMode::Normal => AxisControl::Normal {
+                    lead_deg: lead,
+                    tilt_deg: tilt,
+                },
+                AxisMode::Fixed => AxisControl::Fixed { axis: direction },
+                AxisMode::TowardPoint => AxisControl::TowardPoint { point },
+                AxisMode::FromPoint => AxisControl::FromPoint { point },
+                AxisMode::TowardLine => AxisControl::TowardLine { point, direction },
+                AxisMode::FromLine => AxisControl::FromLine { point, direction },
+            };
+            let sp = SurfaceParams {
+                cutter,
+                stepover,
+                step,
+                angle_deg: angle,
+                projection,
+                leave,
+                feed,
+                axis: AxisOptions {
+                    control,
+                    avoid: !no_avoid,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let r = surface_finish(&parts, &k, Some(&world), Some(tool), m.wcs_origin, &sp);
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            eprintln!("{}", r.summary);
+            let cl = ClProgram {
+                name: format!("5-axis surface T{tool}"),
+                tool: pat_core::post::ClTool {
+                    number: tool,
+                    length: asm.def.gauge_length,
+                    diameter: Some(cutter.radius * 2.0),
+                },
+                spindle_rpm: Some(rpm),
+                coolant: true,
+                moves: r.moves,
+            };
+            emit_program(&m, &cl, output, gcode, dialect)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Swarf {
+            rails,
+            machine,
+            scene,
+            tool,
+            diameter,
+            side,
+            passes,
+            depth_step,
+            leave,
+            tip_offset,
+            feed,
+            rpm,
+            output,
+            gcode,
+            dialect,
+        } => {
+            let m = load_machine(&machine)?;
+            let rails: Rails = serde_json::from_str(&read(&rails)?)
+                .map_err(|e| format!("{}: {e}", rails.display()))?;
+            let world = match &scene {
+                Some(s) => Some(load_world(&machine, &m, Some(s))?),
+                None => None,
+            };
+            let (cutter, len) = match world.as_ref().and_then(|w| w.tool(tool)) {
+                Some(a) => (
+                    a.cutter_shape().ok_or("the tool has no cutter section")?,
+                    a.def.gauge_length,
+                ),
+                None => (
+                    pat_core::stock::CutterShape::flat(diameter, 30.0),
+                    m.default_tool_length,
+                ),
+            };
+            let k = Kinematics::new(m.clone(), len).map_err(|e| e.to_string())?;
+            let sp = SwarfParams {
+                cutter,
+                side: match side {
+                    SideArg::Left => Side::Left,
+                    SideArg::Right => Side::Right,
+                },
+                passes,
+                depth_step,
+                leave,
+                tip_offset,
+                feed,
+                ..Default::default()
+            };
+            let r = swarf(
+                &rails.bottom,
+                &rails.top,
+                &k,
+                world.as_ref(),
+                Some(tool),
+                m.wcs_origin,
+                &sp,
+            );
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            eprintln!(
+                "{} stations, max deviation {:.4} mm",
+                r.stations, r.max_deviation
+            );
+            let cl = ClProgram {
+                name: format!("swarf T{tool}"),
+                tool: pat_core::post::ClTool {
+                    number: tool,
+                    length: len,
+                    diameter: Some(cutter.radius * 2.0),
+                },
+                spindle_rpm: Some(rpm),
+                coolant: true,
+                moves: r.moves,
             };
             emit_program(&m, &cl, output, gcode, dialect)?;
             Ok(ExitCode::SUCCESS)

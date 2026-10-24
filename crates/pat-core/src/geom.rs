@@ -612,6 +612,77 @@ pub fn segment_triangle_param(p0: Vec3, p1: Vec3, t: &[Vec3; 3]) -> Option<f64> 
     (0.0..=1.0).contains(&w).then_some(w)
 }
 
+/// Drop a sphere of radius `r` along `-d` (unit) onto triangle `t`: the
+/// highest centre on the line `q + d·h` at which the sphere touches it.
+/// Returns (h, contact point), considering the face, its edges and vertices.
+pub fn sphere_drop_triangle(q: Vec3, d: Vec3, r: f64, t: &[Vec3; 3]) -> Option<(f64, Vec3)> {
+    let mut best: Option<(f64, Vec3)> = None;
+    let mut consider = |h: f64, contact: Vec3| {
+        if best.is_none_or(|b| h > b.0) {
+            best = Some((h, contact));
+        }
+    };
+    // Face.
+    if let Some(mut n) = (t[1] - t[0]).cross(t[2] - t[0]).normalized() {
+        if n.dot(d) < 0.0 {
+            n = -n;
+        }
+        let nd = n.dot(d);
+        if nd > 1e-12 {
+            let h = (r + n.dot(t[0] - q)) / nd;
+            let c = q + d * h;
+            let p = c - n * r;
+            // Barycentric inside test.
+            let (v0, v1, v2) = (t[1] - t[0], t[2] - t[0], p - t[0]);
+            let (d00, d01, d11, d20, d21) =
+                (v0.dot(v0), v0.dot(v1), v1.dot(v1), v2.dot(v0), v2.dot(v1));
+            let den = d00 * d11 - d01 * d01;
+            if den.abs() > 1e-18 {
+                let v = (d11 * d20 - d01 * d21) / den;
+                let w = (d00 * d21 - d01 * d20) / den;
+                if v >= 0.0 && w >= 0.0 && v + w <= 1.0 {
+                    consider(h, p);
+                }
+            }
+        }
+    }
+    // Edges: the centre line meets the radius-r cylinder around the edge.
+    for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+        let len = (b - a).norm();
+        if len < 1e-12 {
+            continue;
+        }
+        let u = (b - a) * (1.0 / len);
+        let du = d.dot(u);
+        let qa = 1.0 - du * du;
+        if qa < 1e-12 {
+            continue;
+        }
+        let w0 = q - a;
+        let qb = w0.dot(d) - w0.dot(u) * du;
+        let qc = w0.dot(w0) - w0.dot(u).powi(2) - r * r;
+        let disc = qb * qb - qa * qc;
+        if disc < 0.0 {
+            continue;
+        }
+        let h = (-qb + disc.sqrt()) / qa;
+        let s = (w0 + d * h).dot(u);
+        if (0.0..=len).contains(&s) {
+            consider(h, a + u * s);
+        }
+    }
+    // Vertices.
+    for &v in t {
+        let w = v - q;
+        let along = w.dot(d);
+        let perp2 = w.dot(w) - along * along;
+        if perp2 <= r * r {
+            consider(along + (r * r - perp2).sqrt(), v);
+        }
+    }
+    best
+}
+
 /// Two triangles intersect when an edge of one crosses the other.
 /// (Exactly coplanar overlaps are not reported.)
 pub fn triangles_intersect(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {
@@ -645,6 +716,27 @@ mod tests {
         // Wall only above the cylinder top.
         let hi = tri([0.5, -10.0, 11.0], [0.5, 10.0, 11.0], [0.5, 0.0, 20.0]);
         assert!(!cylinder_hits_triangle(&hi, 5.0, 10.0));
+    }
+
+    #[test]
+    fn sphere_drop_cases() {
+        let big = tri([-50.0, -50.0, 0.0], [50.0, -50.0, 0.0], [0.0, 50.0, 0.0]);
+        // Face: centre sits r above the plane.
+        let (h, p) =
+            sphere_drop_triangle(Vec3::new(1.0, 2.0, 100.0), -Vec3::Z * -1.0, 3.0, &big).unwrap();
+        assert!(
+            (h - (-97.0)).abs() < 1e-9 && (p.z).abs() < 1e-9,
+            "{h} {p:?}"
+        );
+        // Vertex: dropping 2 off a sharp corner at (0,0,10).
+        let spike = tri([0.0, 0.0, 10.0], [-1.0, -0.1, 0.0], [-1.0, 0.1, 0.0]);
+        let (h, p) = sphere_drop_triangle(Vec3::new(2.0, 0.0, 0.0), Vec3::Z, 3.0, &spike).unwrap();
+        assert!((h - (10.0 + 5f64.sqrt())).abs() < 1e-9, "{h}");
+        assert_eq!(p, Vec3::new(0.0, 0.0, 10.0));
+        // Edge: a horizontal edge at height 5 along Y, sphere 2 to the side.
+        let ridge = tri([0.0, -10.0, 5.0], [0.0, 10.0, 5.0], [-1.0, 0.0, 0.0]);
+        let (h, _) = sphere_drop_triangle(Vec3::new(2.0, 3.0, 0.0), Vec3::Z, 3.0, &ridge).unwrap();
+        assert!((h - (5.0 + 5f64.sqrt())).abs() < 1e-9, "{h}");
     }
 
     #[test]

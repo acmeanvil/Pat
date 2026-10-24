@@ -20,6 +20,7 @@
 pub mod access;
 pub mod adaptive;
 pub mod collision;
+pub mod fiveaxis;
 pub mod gcode;
 pub mod geom;
 pub mod interp;

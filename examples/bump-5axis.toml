@@ -1,0 +1,49 @@
+# 5-axis finishing demo for machines/trunnion-ac.toml: a cylindrical bump on
+# a block, roughed to a 0.5 mm skin, with a tall clamp beside it.
+#   pat surface -m machines/trunnion-ac.toml --scene examples/bump-5axis.toml --tool 1 --stepover 1 --step 1 --gcode /tmp/bump.ngc
+#   pat check /tmp/bump.ngc -m machines/trunnion-ac.toml --scene examples/bump-5axis.toml --stock
+
+[[tools]]
+number = 1
+name = "6 mm ball end mill"
+gauge_length = 90.0
+segments = [
+  { kind = "cutter", length = 15.0, diameter = 6.0, corner_radius = 3.0 },
+  { kind = "shank",  length = 25.0, diameter = 6.0 },
+  { kind = "holder", length = 40.0, diameter = 24.0 },
+]
+
+[[tools]]
+number = 2
+name = "10 mm flat end mill (swarf)"
+gauge_length = 100.0
+segments = [
+  { kind = "cutter", length = 30.0, diameter = 10.0 },
+  { kind = "shank",  length = 10.0, diameter = 10.0 },
+  { kind = "holder", length = 40.0, diameter = 30.0 },
+]
+
+[[bodies]]
+name = "base"
+role = "part"
+shape = { type = "box", min = [-35.0, -25.0, -20.0], max = [35.0, 25.0, 0.0] }
+
+[[bodies]]
+name = "bump"
+role = "part"
+shape = { type = "cylinder", base = [-30.0, 0.0, 0.0], axis = [1.0, 0.0, 0.0], radius = 15.0, height = 60.0 }
+
+[[bodies]]
+name = "skin base"
+role = "stock"
+shape = { type = "box", min = [-35.5, -25.5, -20.0], max = [35.5, 25.5, 0.5] }
+
+[[bodies]]
+name = "skin bump"
+role = "stock"
+shape = { type = "cylinder", base = [-30.0, 0.0, 0.0], axis = [1.0, 0.0, 0.0], radius = 15.5, height = 60.0 }
+
+[[bodies]]
+name = "tall clamp"
+role = "fixture"
+shape = { type = "box", min = [-10.0, 27.0, -20.0], max = [10.0, 35.0, 60.0] }

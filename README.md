@@ -11,7 +11,7 @@ The goal is a toolpath planner with these features:
 The core is a Rust library with Python bindings. Fusion is the first host, and
 the same engine works from the command line or any Python environment.
 
-**Status: milestones 1–4 of 7 are done.**
+**Status: milestones 1–5 of 7 are done.**
 
 - **Milestone 1:** machine models, forward and inverse kinematics, a G-code
   simulator and a multi-axis post. The simulator covers work offsets, canned
@@ -22,7 +22,12 @@ the same engine works from the command line or any Python environment.
   (constant-engagement) roughing with rest machining, and material-removal
   simulation with gouge detection.
 - **Milestone 4:** continuous 4-axis rotary roughing and finishing, wrapping
-  2D paths onto cylinders, and indexed 4-axis. See [docs/architecture.md](docs/architecture.md) for the
+  2D paths onto cylinders, and indexed 4-axis.
+- **Milestone 5:** simultaneous 5-axis finishing:
+  - surface finishing with tool-axis control (normal with lead and tilt,
+    point and line modes);
+  - automatic collision avoidance, singularity locking and smoothing;
+  - swarf milling. See [docs/architecture.md](docs/architecture.md) for the
 design and roadmap, and
 [reports/CAM software landscape survey.md](reports/CAM%20software%20landscape%20survey.md)
 for the market research behind it.
@@ -68,6 +73,11 @@ cargo run --release -- check /tmp/overhang.ngc -m machines/trunnion-ac.toml --sc
 cargo run --release -- rotary rough -m machines/vmc-4th-a.toml --scene examples/square-bar-4th.toml --tool 1 --gcode /tmp/bar.ngc
 cargo run --release -- check /tmp/bar.ngc -m machines/vmc-4th-a.toml --scene examples/square-bar-4th.toml --stock
 cargo run --release -- wrap examples/wrap-text.json -m machines/vmc-4th-a.toml --radius 14 --depth 0.3 --gcode /tmp/engrave.ngc
+
+# Simultaneous 5-axis: finish a bump with the axis following the surface (avoiding a clamp), then swarf a sloped wall
+cargo run --release -- surface -m machines/trunnion-ac.toml --scene examples/bump-5axis.toml --tool 1 --stepover 1 --step 1 --gcode /tmp/bump.ngc
+cargo run --release -- check /tmp/bump.ngc -m machines/trunnion-ac.toml --scene examples/bump-5axis.toml --stock
+cargo run --release -- swarf examples/wall-rails.json -m machines/trunnion-ac.toml --scene examples/bump-5axis.toml --tool 2 --side right --gcode /tmp/swarf.ngc
 ```
 
 Add `--json` to `check` or `machine` for machine-readable output. Use

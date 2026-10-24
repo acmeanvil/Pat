@@ -265,7 +265,12 @@ pub struct Contact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveClass {
     Rapid,
+    /// Cutting: the cutter may touch the part.
     Feed,
+    /// Finishing with a fixed contact: only the cutter's corner region (the
+    /// ball of a ball end mill) may touch the part; its side above that is
+    /// checked like the shank.
+    Finish,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -452,17 +457,29 @@ impl World {
                 }
                 let to_local = place.inverse().then(&tool_iso);
                 for kind in [SegmentKind::Holder, SegmentKind::Shank, SegmentKind::Cutter] {
-                    if kind == SegmentKind::Cutter
-                        && b.role == Role::Part
-                        && class == MoveClass::Feed
-                    {
+                    let cutting_part = kind == SegmentKind::Cutter && b.role == Role::Part;
+                    if cutting_part && class == MoveClass::Feed {
                         continue; // cutting
                     }
-                    let hit = asm
-                        .cyls
-                        .iter()
-                        .filter(|c| c.kind == kind)
-                        .any(|c| cylinder_hits_body(b, &to_local, c, margin));
+                    // Finishing: skip the corner region that makes the contact.
+                    let floor = if cutting_part && class == MoveClass::Finish {
+                        asm.cutter_shape().map_or(0.0, |c| c.corner_radius) + 0.05 + margin
+                    } else {
+                        f64::NEG_INFINITY
+                    };
+                    let hit = asm.cyls.iter().filter(|c| c.kind == kind).any(|c| {
+                        let top = c.z0 + c.height;
+                        if top <= floor {
+                            return false;
+                        }
+                        let z0 = c.z0.max(floor);
+                        let trimmed = Cyl {
+                            z0,
+                            height: top - z0,
+                            ..*c
+                        };
+                        cylinder_hits_body(b, &to_local, &trimmed, margin)
+                    });
                     if hit {
                         out.push(Contact {
                             a: format!("T{} {}", asm.def.number, kind_name(kind)),
