@@ -81,7 +81,8 @@ pub fn tool_list() -> Value {
         {"name": "inverse_kinematics", "description": "All machine joint solutions for a tool tip and axis (WCS), with limit and singularity flags.",
          "inputSchema": schema(json!({"tip": p3, "axis": dir, "tool": {"type": "integer"}}), &["tip", "axis"])},
         {"name": "get_program", "description": "Details of a generated program: verification report, generator summary and the first lines of G-code.",
-         "inputSchema": schema(json!({"id": {"type": "integer"}, "gcode_lines": {"type": "integer", "default": 40}}), &["id"])},
+         "inputSchema": schema(json!({"id": {"type": "integer"}, "gcode_lines": {"type": "integer", "default": 40},
+            "include_cl": {"type": "boolean", "default": false, "description": "also return the cutter-location moves (large)"}}), &["id"])},
         {"name": "save_program", "description": "Write a generated program's G-code to a workspace file. Refused if it failed verification unless force=true (only with the user's explicit consent).",
          "inputSchema": schema(json!({"id": {"type": "integer"}, "path": {"type": "string"}, "force": {"type": "boolean", "default": false}}), &["id", "path"])},
     ])
@@ -169,6 +170,9 @@ impl Server {
             "get_program" => s.get_program(
                 a.get("id").and_then(Value::as_u64).ok_or("missing 'id'")? as usize,
                 a.get("gcode_lines").and_then(Value::as_u64).unwrap_or(40) as usize,
+                a.get("include_cl")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
             ),
             "save_program" => s.save_program(
                 a.get("id").and_then(Value::as_u64).ok_or("missing 'id'")? as usize,

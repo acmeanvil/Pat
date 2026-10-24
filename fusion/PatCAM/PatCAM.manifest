@@ -1,0 +1,13 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "addin",
+  "id": "602d82ef-f8a1-4e1c-ae29-23afa552c451",
+  "author": "Pat contributors",
+  "description": {
+    "": "Pat: open-source 3/4/5-axis toolpaths with built-in verification (adaptive and 3+2 roughing, 4th-axis, 5-axis finishing, G-code checking)."
+  },
+  "version": "0.1.0",
+  "runOnStartup": false,
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}

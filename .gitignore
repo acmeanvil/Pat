@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 *.whl
+/dist
+/fusion/PatCAM/lib/*
+!/fusion/PatCAM/lib/.gitkeep
+/fusion/PatCAM/resources/machines

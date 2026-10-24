@@ -482,6 +482,43 @@ fn inverse(
     serde_json::to_string(&k.inverse_all(&pose, prev.as_deref()).map_err(err)?).map_err(err)
 }
 
+/// A stateful Pat workspace: the same tools the MCP server offers to AI
+/// agents (load_machine, load_scene, rough, surface_finish, ...), with the
+/// same safety rules. Every generated program is verified by simulation and
+/// unverified programs are not saved without force. Arguments and results
+/// are JSON strings.
+#[pyclass(name = "Session", unsendable)]
+struct PySession {
+    server: pat_mcp::Server,
+}
+
+#[pymethods]
+impl PySession {
+    #[new]
+    fn new(root: &str) -> Self {
+        PySession {
+            server: pat_mcp::Server::new(pat_core::session::Session::new(root)),
+        }
+    }
+
+    /// Run a tool by name with JSON arguments; returns the JSON result or
+    /// raises ValueError with the tool's error message.
+    #[pyo3(signature = (name, args_json=None))]
+    fn call(&mut self, name: &str, args_json: Option<&str>) -> PyResult<String> {
+        let args: serde_json::Value = match args_json {
+            Some(s) if !s.trim().is_empty() => serde_json::from_str(s).map_err(err)?,
+            _ => serde_json::json!({}),
+        };
+        let v = self.server.call(name, &args).map_err(err)?;
+        serde_json::to_string(&v).map_err(err)
+    }
+
+    /// Tool definitions (name, description, input schema) as JSON.
+    fn tools(&self) -> String {
+        pat_mcp::tool_list().to_string()
+    }
+}
+
 #[pymodule(name = "pat")]
 fn pat_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(load_machine, m)?)?;
@@ -497,6 +534,7 @@ fn pat_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(swarf_wall, m)?)?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(inverse, m)?)?;
+    m.add_class::<PySession>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }

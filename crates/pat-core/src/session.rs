@@ -645,19 +645,25 @@ impl Session {
         }))
     }
 
-    pub fn get_program(&self, id: usize, gcode_lines: usize) -> Result<Value> {
+    /// Program details; with `include_cl`, also the cutter-location moves
+    /// (tip, axis, feed) for previews.
+    pub fn get_program(&self, id: usize, gcode_lines: usize, include_cl: bool) -> Result<Value> {
         let p = self
             .programs
             .iter()
             .find(|p| p.id == id)
             .ok_or_else(|| format!("no program {id}"))?;
         let head: Vec<&str> = p.gcode.lines().take(gcode_lines).collect();
-        Ok(json!({
+        let mut v = json!({
             "id": p.id, "name": p.name, "kind": p.kind, "dialect": p.dialect,
             "moves": p.cl.moves.len(), "blocks": p.gcode.lines().count(),
             "verified": p.verified, "verification": p.verification, "summary": p.summary,
             "gcode_head": head,
-        }))
+        });
+        if include_cl {
+            v["cl_moves"] = serde_json::to_value(&p.cl.moves).map_err(|e| e.to_string())?;
+        }
+        Ok(v)
     }
 
     /// Write a program's G-code inside the workspace. Programs that failed

@@ -311,16 +311,49 @@ Tested through the API and over real stdio with the built binary: handshake,
 tool schemas, tool errors, path confinement, a full plan → rough → verify →
 save workflow, and remedies for a crashing program.
 
-## Roadmap
+## Milestone 7: Fusion adapter (done; untested inside Fusion)
 
-1. **Fusion adapter.**
-   - The add-in reads the machine definition (`adsk.cam.Machine`), BRep/mesh,
-     stock and tools.
-   - It runs `pat` through the Python wheel and previews toolpaths with custom
-     graphics.
-   - It writes G-code with the Pat post.
-   - Open questions from the survey (reading CL data, Manual NC payloads,
-     Personal-tier terms) must be settled before this ships.
+- **`pat.Session` in Python**: the same 13 tools and safety rules as the MCP
+  server (verification on every program, saving gated, paths confined).
+- **`fusion/PatCAM`**, a Fusion add-in:
+  - **`pat_fusion`** (no `adsk` imports, unit tested in CI):
+    - Fusion tool-library JSON → Pat tools (flat, ball and bull nose; holder
+      segments; inch and mm; gauge length = stick-out + holder);
+    - binary STL output;
+    - setup (scene) TOML generation;
+    - conversions between design space (cm) and the setup's WCS (mm);
+    - toolpath preview polylines;
+    - `Job`, a job folder plus engine session.
+  - **`patcam_glue`** (Fusion API) adds three commands:
+    - *Generate & Verify*: exports the setup's models, stock and fixtures as
+      STL in the WCS and the tools from its operations, runs a strategy,
+      previews the result with custom graphics, shows the verification
+      report, and saves G-code with an explicit warning for unverified
+      programs;
+    - *Check G-code*;
+    - *Clear Preview*.
+- **`fusion/build_addin.py`** bundles the abi3 engine (universal2 on macOS)
+  and the machine files into `dist/PatCAM-<platform>.zip`. CI builds these as
+  artifacts for macOS and Windows and runs the adapter tests, including an
+  export → rough → verify → save run with no Fusion involved.
+
+Open items from the survey that still need a real Fusion session:
+- reading machine kinematics from `adsk.cam.Machine` (today a Pat machine
+  file is chosen);
+- whether `Setup.workCoordinateSystem` behaves as assumed in every setup
+  type;
+- custom-graphics performance on very large toolpaths;
+- Personal-tier terms for writing G-code from an add-in.
+
+## Beyond the roadmap
+
+- Validate the add-in in Fusion and read machine definitions from it.
+- Flowline and UV patterns from Fusion B-rep faces; swarf walls picked from
+  B-rep edges.
+- Constant-engagement 4-axis roughing and engagement-based feed control.
+- Post dialects: Heidenhain (M128, PLANE), Siemens (TRAORI, CYCLE800), Haas
+  (G234), G68.2 output for 3+2, rotary unwinding.
+- Dexel or SDF stock for finer verification; material-removal preview.
 
 ## Licensing rules for contributions
 

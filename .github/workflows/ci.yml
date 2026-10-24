@@ -29,3 +29,30 @@ jobs:
           python-version: "3.12"
       - run: pip install maturin
       - run: maturin build --release -m crates/pat-py/Cargo.toml
+      - run: pip install target/wheels/*.whl
+      - name: Fusion adapter tests
+        run: python -m unittest discover -s fusion/tests -v
+
+  fusion-addin:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            args: --universal2
+          - os: windows-latest
+            args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin
+      - run: python fusion/build_addin.py ${{ matrix.args }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fusion-addin-${{ matrix.os }}
+          path: dist/*.zip

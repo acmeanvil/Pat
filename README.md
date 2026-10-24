@@ -11,7 +11,7 @@ The goal is a toolpath planner with these features:
 The core is a Rust library with Python bindings. Fusion is the first host, and
 the same engine works from the command line or any Python environment.
 
-**Status: milestones 1–6 of 7 are done.**
+**Status: all 7 roadmap milestones are done.** The Fusion add-in still needs testing inside Fusion.
 
 - **Milestone 1:** machine models, forward and inverse kinematics, a G-code
   simulator and a multi-axis post. The simulator covers work offsets, canned
@@ -31,7 +31,10 @@ the same engine works from the command line or any Python environment.
 - **Milestone 6:** AI agent integration. The `pat-mcp` MCP server lets
   assistants such as Claude plan, generate and verify toolpaths. Every program
   is verified by simulation, and failing ones are not saved. See
-  [docs/agent.md](docs/agent.md). See [docs/architecture.md](docs/architecture.md) for the
+  [docs/agent.md](docs/agent.md).
+- **Milestone 7:** a Fusion add-in (`fusion/PatCAM`). It exports a setup,
+  generates and verifies toolpaths with Pat, previews them and writes G-code.
+  See [fusion/README.md](fusion/README.md). See [docs/architecture.md](docs/architecture.md) for the
 design and roadmap, and
 [reports/CAM software landscape survey.md](reports/CAM%20software%20landscape%20survey.md)
 for the market research behind it.
@@ -44,6 +47,7 @@ for the market research behind it.
 | `crates/pat-cli` | `pat` command-line tool |
 | `crates/pat-py` | Python module `pat` (for the Fusion add-in and scripting) |
 | `crates/pat-mcp` | MCP server for AI agents (`pat-mcp`) |
+| `fusion/` | Fusion add-in (`PatCAM`), its tests and build script |
 | `machines/` | Example machine definitions (table-table, head-table, head-head, 4th axis, 3-axis) |
 | `examples/` | Sample CL path and G-code |
 

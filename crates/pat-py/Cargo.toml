@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pat-core.workspace = true
+pat-mcp = { path = "../pat-mcp" }
 serde_json.workspace = true
 serde.workspace = true
 pyo3 = { version = "0.30", features = ["extension-module", "abi3-py310"] }

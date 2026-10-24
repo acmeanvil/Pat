@@ -195,6 +195,7 @@ name = "pat-py"
 version = "0.1.0"
 dependencies = [
  "pat-core",
+ "pat-mcp",
  "pyo3",
  "serde",
  "serde_json",
