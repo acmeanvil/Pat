@@ -54,6 +54,14 @@ pub struct RoughParams {
     /// Clearance kept between the tool assembly and fixtures / machine
     /// bodies (mm).
     pub obstacle_clearance: f64,
+    /// Adjust the feed to the actual load at each point (chip-thinning
+    /// compensation on light cuts, slowing down on heavy ones).
+    pub feed_control: bool,
+    /// Feed adjustment range as factors of `feed`.
+    pub min_feed_factor: f64,
+    pub max_feed_factor: f64,
+    /// Path smoothing (fraction of the stepover a point may move; 0 = off).
+    pub smoothing: f64,
 }
 
 impl Default for RoughParams {
@@ -72,6 +80,10 @@ impl Default for RoughParams {
             link_feed: 3000.0,
             flat_levels: true,
             obstacle_clearance: 2.0,
+            feed_control: true,
+            min_feed_factor: 0.4,
+            max_feed_factor: 2.0,
+            smoothing: 0.3,
         }
     }
 }
@@ -399,8 +411,20 @@ pub fn rough_with(
                     for w in pass.pts.windows(2) {
                         st.cut_length_mm += (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
                     }
-                    for q in pass.pts.iter().skip(1) {
-                        emit(&mut moves, stock, to_wcs(q[0], q[1], z), Some(p.feed));
+                    let feeds = if p.feed_control {
+                        load_feeds(
+                            &pass.load,
+                            p.feed,
+                            p.stepover,
+                            r,
+                            p.min_feed_factor,
+                            p.max_feed_factor,
+                        )
+                    } else {
+                        vec![p.feed; pass.pts.len()]
+                    };
+                    for (q, &fr) in pass.pts.iter().zip(&feeds).skip(1) {
+                        emit(&mut moves, stock, to_wcs(q[0], q[1], z), Some(fr));
                     }
                 }
             }
@@ -422,6 +446,58 @@ pub fn rough_with(
         remaining_mm3: after,
         warnings,
     }
+}
+
+/// Chip-thinning factor: how much faster a cutter of radius `r` can feed at
+/// radial engagement `ae` than in a half-diameter cut, for the same chip.
+pub fn chip_thinning(ae: f64, r: f64) -> f64 {
+    if ae >= r {
+        1.0
+    } else {
+        let ae = ae.max(1e-3 * r);
+        r / (2.0 * r * ae - ae * ae).sqrt()
+    }
+}
+
+/// Feed per point from the measured load (1.0 = cutting the target width
+/// `stepover`).
+///
+/// - Lighter cuts feed faster, by the ratio of chip-thinning factors, so the
+///   chip thickness stays as planned.
+/// - Overloaded cuts slow down in proportion to the extra material.
+/// - The result is clamped to [min, max]·feed, smoothed over a few points
+///   and rounded to 5% steps so the control isn't flooded with tiny changes.
+pub fn load_feeds(
+    load: &[f64],
+    feed: f64,
+    stepover: f64,
+    r: f64,
+    min_f: f64,
+    max_f: f64,
+) -> Vec<f64> {
+    let base = chip_thinning(stepover, r);
+    let raw: Vec<f64> = load
+        .iter()
+        .map(|&l| {
+            let ae = (l * stepover).max(0.02 * stepover);
+            let mut k = chip_thinning(ae, r) / base;
+            if l > 1.05 {
+                k = k.min(1.0 / l);
+            }
+            k.clamp(min_f, max_f)
+        })
+        .collect();
+    (0..raw.len())
+        .map(|i| {
+            let lo = i.saturating_sub(2);
+            let hi = (i + 2).min(raw.len() - 1);
+            // Never smooth an overload away: take the smaller of the local
+            // average and the point itself when the point is slowed down.
+            let avg = raw[lo..=hi].iter().sum::<f64>() / (hi - lo + 1) as f64;
+            let k = if raw[i] < 1.0 { avg.min(raw[i]) } else { avg };
+            ((k * 20.0).round() / 20.0).clamp(min_f, max_f) * feed
+        })
+        .collect()
 }
 
 fn cells_max(g: &Grid2<f64>, c: [f64; 2], rad: f64) -> f64 {
@@ -450,5 +526,32 @@ pub fn machining_frame(origin: Vec3, axis: Vec3) -> Iso {
     Iso {
         r: crate::math::Mat3::from_cols(x, y, z),
         t: origin,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feeds_follow_load() {
+        // Ø10 cutter, 1.5 mm target width at 1000 mm/min.
+        let f = load_feeds(
+            &[1.0, 1.0, 1.0, 0.3, 0.3, 0.3, 0.3, 0.3, 1.8, 1.8, 1.8],
+            1000.0,
+            1.5,
+            5.0,
+            0.4,
+            2.0,
+        );
+        assert!((f[0] - 1000.0).abs() < 1e-9, "{f:?}");
+        assert!(f[5] > 1300.0, "light cut should speed up: {f:?}");
+        assert!(
+            f[9] <= 1000.0 / 1.8 + 50.0,
+            "heavy cut should slow down: {f:?}"
+        );
+        assert!(f.iter().all(|&v| (400.0..=2000.0).contains(&v)));
+        assert!((chip_thinning(5.0, 5.0) - 1.0).abs() < 1e-12);
+        assert!(chip_thinning(0.5, 5.0) > 2.0);
     }
 }

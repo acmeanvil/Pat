@@ -31,8 +31,9 @@ claude mcp add pat -- /path/to/Pat/target/release/pat-mcp --root /path/to/your/j
 | `describe_setup` | Axes, limits, machine geometry, tools, bodies, programs so far. |
 | `check_gcode` | Simulate any G-code: limits, collisions, gouges, singularities, feeds, cycle time. |
 | `plan_orientations` | 3+2 setups that reach the part, with rotary and G68.2 angles and explanations. |
-| `rough` | Adaptive roughing along an axis, or automatic 3+2. |
-| `rotary` | Continuous 4-axis roughing or finishing. |
+| `rough` | Adaptive roughing (feed adjusted to load, smoothed corners) along an axis, or automatic 3+2. |
+| `trochoidal_slot` | High-speed trochoidal slotting along a centre line, with measured engagement. |
+| `rotary` | Continuous 4-axis roughing (constant-engagement adaptive or helical) or finishing. |
 | `surface_finish` | Simultaneous 5-axis finishing with tool-axis control and collision avoidance. |
 | `swarf` | Flank milling of a ruled wall from two rails. |
 | `tilt` | Smallest collision-free tilt at a point, and what blocks the preferred axis. |

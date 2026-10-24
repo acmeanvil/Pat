@@ -616,6 +616,45 @@ impl Session {
         self.add_program("swarf", cl, d, summary)
     }
 
+    /// Trochoidal slot along a centre line (WCS XY points).
+    #[allow(clippy::too_many_arguments)]
+    pub fn trochoidal_slot(
+        &mut self,
+        tool: u32,
+        centerline: Vec<[f64; 2]>,
+        width: f64,
+        z_top: f64,
+        z_bottom: f64,
+        params: Option<&Value>,
+        dialect: Option<&str>,
+    ) -> Result<Value> {
+        let (_, cutter, len) = self.tool_kin(tool)?;
+        let mut sp: crate::slot::SlotParams = from_json(params)?;
+        sp.cutter = cutter;
+        sp.width = width;
+        sp.z_top = z_top;
+        sp.z_bottom = z_bottom;
+        let r = crate::slot::trochoidal_slot(&centerline, &sp);
+        if r.moves.is_empty() {
+            return Err(r.warnings.join("; "));
+        }
+        let summary = json!({
+            "levels": r.levels, "loops": r.loops, "loop_radius_mm": r.loop_radius,
+            "max_engagement_mm": (r.max_engagement_mm * 1000.0).round() / 1000.0,
+            "max_engagement_ratio": (r.max_engagement_ratio * 1000.0).round() / 1000.0,
+            "warnings": r.warnings,
+        });
+        let d = dialect_from(dialect)?.unwrap_or(self.default_dialect());
+        let cl = self.cl(
+            format!("trochoidal slot T{tool}"),
+            tool,
+            len,
+            cutter.radius * 2.0,
+            r.moves,
+        );
+        self.add_program("trochoidal-slot", cl, d, summary)
+    }
+
     /// Smallest tilt from `axis` that reaches `tip` without collision.
     pub fn tilt(&self, tool: u32, tip: Vec3, axis: Vec3, options: Option<&Value>) -> Result<Value> {
         let (kin, _, _) = self.tool_kin(tool)?;

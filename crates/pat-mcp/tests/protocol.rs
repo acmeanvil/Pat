@@ -35,7 +35,7 @@ fn handshake_and_tool_list() {
         .handle(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}))
         .unwrap();
     let tools = r["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 14);
     for t in tools {
         assert!(
             t["description"].as_str().unwrap().len() > 20,

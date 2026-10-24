@@ -339,3 +339,96 @@ fn feed_rate_model_without_accel_data() {
     assert_eq!(r.cycle_time_model, "feed-rate");
     assert!((r.cycle_time_s - (r.cutting_time_s + r.rapid_time_s)).abs() < 1e-9);
 }
+
+#[test]
+fn trochoidal_slot_replays_cleanly() {
+    use pat_core::collision::{SceneDef, World};
+    use pat_core::post::{post, ClProgram, ClTool, Dialect, PostOptions};
+    use pat_core::slot::{trochoidal_slot, SlotParams};
+    use pat_core::stock::CutterShape;
+    let m = machine(VMC_3AXIS);
+    let p = SlotParams {
+        cutter: CutterShape::flat(8.0, 25.0),
+        width: 12.0,
+        z_top: 0.0,
+        z_bottom: -10.0,
+        pitch: 0.8,
+        ..Default::default()
+    };
+    let r = trochoidal_slot(&[[-35.0, 0.0], [35.0, 0.0]], &p);
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    let cl = ClProgram {
+        name: "slot".into(),
+        tool: ClTool {
+            number: 1,
+            length: 90.0,
+            diameter: Some(8.0),
+        },
+        spindle_rpm: Some(12000.0),
+        coolant: true,
+        moves: r.moves,
+    };
+    let out = post(
+        &m,
+        &cl,
+        &PostOptions {
+            dialect: Dialect::LinuxcncJoint,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // The loops are true circles: the post turns most of them into arcs.
+    let arcs = out
+        .gcode
+        .lines()
+        .filter(|l| l.starts_with("G2") || l.starts_with("G3"))
+        .count();
+    assert!(arcs > 50, "{arcs} arcs");
+    let scene = SceneDef::from_toml(
+        r#"
+[[tools]]
+number = 1
+gauge_length = 90.0
+segments = [
+  { kind = "cutter", length = 25.0, diameter = 8.0 },
+  { kind = "shank", length = 20.0, diameter = 8.0 },
+  { kind = "holder", length = 40.0, diameter = 30.0 },
+]
+[[bodies]]
+name = "stock"
+role = "stock"
+shape = { type = "box", min = [-35.0, -25.0, -20.0], max = [35.0, 25.0, 0.0] }
+[[bodies]]
+name = "floor"
+role = "part"
+shape = { type = "box", min = [-35.0, -25.0, -20.0], max = [35.0, 25.0, -10.0] }
+[[bodies]]
+name = "left"
+role = "part"
+shape = { type = "box", min = [-35.0, -25.0, -10.0], max = [35.0, -6.0, 0.0] }
+[[bodies]]
+name = "right"
+role = "part"
+shape = { type = "box", min = [-35.0, 6.0, -10.0], max = [35.0, 25.0, 0.0] }
+"#,
+    )
+    .unwrap();
+    let kin = pat_core::Kinematics::new(m.clone(), 90.0).unwrap();
+    let world = World::build(&kin, &scene, None, None).unwrap();
+    let opts = SimOptions {
+        world: Some(std::sync::Arc::new(world)),
+        simulate_stock: true,
+        stock_resolution: 0.5,
+        gouge_tolerance: 0.1,
+        ..tool(90.0)
+    };
+    let rep = simulate(&m, &out.gcode, &opts);
+    assert!(
+        rep.ok,
+        "{:#?}",
+        rep.issues.iter().take(6).collect::<Vec<_>>()
+    );
+    // The slot's volume (70 x 12 x 10) is gone, within voxel accuracy.
+    let removed = rep.stock.unwrap().removed_mm3;
+    assert!((removed - 8400.0).abs() < 600.0, "removed {removed}");
+}

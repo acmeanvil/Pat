@@ -32,6 +32,9 @@ the same engine works from the command line or any Python environment.
   assistants such as Claude plan, generate and verify toolpaths. Every program
   is verified by simulation, and failing ones are not saved. See
   [docs/agent.md](docs/agent.md).
+- **High-speed machining additions:** load-based feed control, path
+  smoothing, G2/G3 arc fitting, trochoidal slotting and constant-engagement
+  4-axis roughing.
 - **Milestone 7:** a Fusion add-in (`fusion/PatCAM`). It exports a setup,
   generates and verifies toolpaths with Pat, previews them and writes G-code.
   See [fusion/README.md](fusion/README.md). See [docs/architecture.md](docs/architecture.md) for the
@@ -82,6 +85,9 @@ cargo run --release -- check /tmp/overhang.ngc -m machines/trunnion-ac.toml --sc
 cargo run --release -- rotary rough -m machines/vmc-4th-a.toml --scene examples/square-bar-4th.toml --tool 1 --gcode /tmp/bar.ngc
 cargo run --release -- check /tmp/bar.ngc -m machines/vmc-4th-a.toml --scene examples/square-bar-4th.toml --stock
 cargo run --release -- wrap examples/wrap-text.json -m machines/vmc-4th-a.toml --radius 14 --depth 0.3 --gcode /tmp/engrave.ngc
+
+# High-speed trochoidal slot (loops become G2/G3 arcs)
+cargo run --release -- slot -m machines/vmc-3axis.toml --line "-35,0;35,0" --width 12 --z-bottom -10 --gcode /tmp/slot.ngc
 
 # Simultaneous 5-axis: finish a bump with the axis following the surface (avoiding a clamp), then swarf a sloped wall
 cargo run --release -- surface -m machines/trunnion-ac.toml --scene examples/bump-5axis.toml --tool 1 --stepover 1 --step 1 --gcode /tmp/bump.ngc

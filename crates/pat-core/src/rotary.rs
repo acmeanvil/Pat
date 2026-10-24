@@ -347,6 +347,21 @@ pub struct RotaryParams {
     /// stock is held (chuck, tailstock) and must not be machined away.
     /// Default: the part's axial extent.
     pub x_range: Option<(f64, f64)>,
+    /// Roughing pattern: constant-engagement adaptive clearing on the
+    /// unrolled cylinder (default) or plain helical passes.
+    pub pattern: RotaryPattern,
+    /// Feed through cleared space (adaptive links, mm/min).
+    pub link_feed: f64,
+    /// Adjust the feed to the measured load (adaptive pattern).
+    pub feed_control: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RotaryPattern {
+    #[default]
+    Adaptive,
+    Helical,
 }
 
 impl Default for RotaryParams {
@@ -364,6 +379,9 @@ impl Default for RotaryParams {
             plunge_feed: 500.0,
             flat_levels: true,
             x_range: None,
+            pattern: RotaryPattern::Adaptive,
+            link_feed: 3000.0,
+            feed_control: true,
         }
     }
 }
@@ -377,6 +395,9 @@ pub struct RotaryResult {
     pub removed_mm3: f64,
     pub remaining_mm3: f64,
     pub warnings: Vec<String>,
+    /// Adaptive pattern: share of cutting steps above 1.5x the target load.
+    #[serde(default)]
+    pub overload_fraction: f64,
 }
 
 /// Emits CL moves in WCS and keeps the voxel stock in sync.
@@ -447,6 +468,7 @@ pub fn rotary_rough(
             removed_mm3: 0.0,
             remaining_mm3: 0.0,
             warnings: vec!["the stock is empty".into()],
+            overload_fraction: 0.0,
         };
     };
     let (x_lo, x_hi, r_max) = cyl_extent(f, &sb);
@@ -476,6 +498,7 @@ pub fn rotary_rough(
             removed_mm3: 0.0,
             remaining_mm3: before,
             warnings,
+            overload_fraction: 0.0,
         };
     }
     let r_floor = limit
@@ -530,6 +553,7 @@ pub fn rotary_rough(
         cut_len: 0.0,
     };
     let pitch = p.stepover.max(0.05);
+    let (mut total_steps, mut overloaded) = (0usize, 0usize);
     for (li, &r) in levels.iter().enumerate() {
         // Axial span with material at this level.
         let srad_now = stock_radius(em.stock.as_deref().unwrap(), f, &rmap, r_max + 1.0);
@@ -546,6 +570,12 @@ pub fn rotary_rough(
             (xb + p.cutter.radius).min(xr1),
         );
         if xa > xb {
+            continue;
+        }
+        if p.pattern == RotaryPattern::Adaptive {
+            let (steps, over) = adaptive_level(&mut em, &limit, &srad_now, r, r_safe, (xa, xb), p);
+            total_steps += steps;
+            overloaded += over;
             continue;
         }
         // Alternate the axial direction each level to avoid long repositioning.
@@ -587,7 +617,118 @@ pub fn rotary_rough(
         removed_mm3: before - after,
         remaining_mm3: after,
         warnings,
+        overload_fraction: if total_steps > 0 {
+            overloaded as f64 / total_steps as f64
+        } else {
+            0.0
+        },
     }
+}
+
+/// One radial level of constant-engagement roughing: unroll the cylinder at
+/// radius `r` into an (x, arc length) plane, clear it adaptively, and wrap
+/// the passes back. The plane overlaps the seam by about a tool diameter so
+/// the cut is continuous across θ = 0. Returns (cutting steps, overloaded
+/// steps).
+#[allow(clippy::too_many_arguments)]
+fn adaptive_level(
+    em: &mut Emitter,
+    limit: &CylGrid,
+    srad: &CylGrid,
+    r: f64,
+    r_safe: f64,
+    (xa, xb): (f64, f64),
+    p: &RotaryParams,
+) -> (usize, usize) {
+    use crate::adaptive::{adaptive_clear, AdaptiveParams, PassKind};
+    use crate::raster::Grid2;
+    let tr = p.cutter.radius;
+    let res = p.dx.max(0.05);
+    let circ = TAU * r;
+    let m = tr + 2.0 * res;
+    let mut allowed: Grid2<bool> = Grid2::covering(
+        Vec3::new(xa, -m, 0.0),
+        Vec3::new(xb, circ + m, 0.0),
+        res,
+        false,
+    );
+    let mut material = allowed.like(false);
+    for j in 0..allowed.ny {
+        for i in 0..allowed.nx {
+            let (x, v) = allowed.xy(i, j);
+            let th = v / r;
+            let k = allowed.idx(i, j);
+            allowed.data[k] = limit.at_max(x, th).is_some_and(|l| l <= r + 1e-9);
+            material.data[k] = srad
+                .at(x, th)
+                .is_some_and(|s| s >= r + 0.5 * res.min(p.stepdown * 0.1));
+        }
+    }
+    let ap = AdaptiveParams {
+        tool_radius: tr,
+        stepover: p.stepover,
+        ..Default::default()
+    };
+    let result = adaptive_clear(&allowed, &material, &ap);
+    let (mut steps, mut over) = (0usize, 0usize);
+    let mut down = false;
+    for pass in &result.passes {
+        let [x0, v0] = pass.pts[0];
+        match pass.kind {
+            PassKind::AirEntry | PassKind::HelixEntry { .. } => {
+                if down {
+                    em.retract(r_safe);
+                }
+                em.go(x0, v0 / r, r_safe, None);
+                match pass.kind {
+                    PassKind::HelixEntry { radius } if radius > 0.05 => {
+                        // Helix down radially around the entry point.
+                        let top = srad.at_max(x0, v0 / r).unwrap_or(r).max(r) + 1.0;
+                        em.go(x0 + radius, v0 / r, top, None);
+                        let n =
+                            (((top - r) / (TAU * radius * 0.05)).ceil().max(1.0) * 36.0) as usize;
+                        for k in 1..=n {
+                            let a = k as f64 / 36.0 * TAU;
+                            let rr = top + (r - top) * k as f64 / n as f64;
+                            em.go(
+                                x0 + radius * a.cos(),
+                                (v0 + radius * a.sin()) / r,
+                                rr,
+                                Some(p.plunge_feed),
+                            );
+                        }
+                        em.go(x0, v0 / r, r, Some(p.feed));
+                    }
+                    _ => {
+                        em.go(x0, v0 / r, r + 1.0, None);
+                        em.go(x0, v0 / r, r, Some(p.plunge_feed));
+                    }
+                }
+                down = true;
+            }
+            PassKind::Link => {
+                for q in pass.pts.iter().skip(1) {
+                    em.go(q[0], q[1] / r, r, Some(p.link_feed));
+                }
+            }
+            PassKind::Cut => {
+                let feeds = if p.feed_control {
+                    crate::rough::load_feeds(&pass.load, p.feed, p.stepover, tr, 0.4, 2.0)
+                } else {
+                    vec![p.feed; pass.pts.len()]
+                };
+                for (q, (&fr, &l)) in pass.pts.iter().zip(feeds.iter().zip(&pass.load)).skip(1) {
+                    steps += 1;
+                    over += (l > 1.5) as usize;
+                    em.go(q[0], q[1] / r, r, Some(fr));
+                }
+            }
+        }
+    }
+    if down {
+        em.retract(r_safe);
+    }
+    (steps, over)
 }
 
 /// Continuous 4-axis finishing: a helix of pitch `stepover` that keeps the
@@ -661,6 +802,7 @@ pub fn rotary_finish(
         removed_mm3: 0.0,
         remaining_mm3: 0.0,
         warnings: vec![],
+        overload_fraction: 0.0,
     }
 }
 

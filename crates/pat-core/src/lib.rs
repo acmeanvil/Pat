@@ -36,6 +36,7 @@ pub mod rotary;
 pub mod rough;
 pub mod session;
 pub mod sim;
+pub mod slot;
 pub mod stock;
 pub mod subs;
 

@@ -299,3 +299,95 @@ fn inch_units_convert() {
     assert!((r.cutting_length_mm - 25.4).abs() < 1e-9);
     assert!((r.cutting_time_s - 6.0).abs() < 1e-9);
 }
+
+#[test]
+fn arcs_replace_circular_runs() {
+    // A full circle of radius 10 at constant Z on a 3-axis machine, plus a
+    // straight run: the circle becomes arcs, the line stays G1.
+    let m = machine(VMC_3AXIS);
+    let mut moves = vec![ClMove::Rapid {
+        tip: Vec3::new(10.0, 0.0, 5.0),
+        axis: Vec3::Z,
+    }];
+    moves.push(ClMove::Feed {
+        tip: Vec3::new(10.0, 0.0, -2.0),
+        axis: Vec3::Z,
+        feed: 500.0,
+    });
+    for k in 1..=360 {
+        let a = (k as f64).to_radians();
+        moves.push(ClMove::Feed {
+            tip: Vec3::new(10.0 * a.cos(), 10.0 * a.sin(), -2.0),
+            axis: Vec3::Z,
+            feed: 800.0,
+        });
+    }
+    for k in 1..=20 {
+        moves.push(ClMove::Feed {
+            tip: Vec3::new(10.0 + k as f64, 0.0, -2.0),
+            axis: Vec3::Z,
+            feed: 800.0,
+        });
+    }
+    let cl = ClProgram {
+        name: "arcs".into(),
+        tool: ClTool {
+            number: 1,
+            length: 80.0,
+            diameter: None,
+        },
+        spindle_rpm: None,
+        coolant: false,
+        moves,
+    };
+    for dialect in [Dialect::LinuxcncJoint, Dialect::FanucTcp] {
+        let plain = post(
+            &m,
+            &cl,
+            &PostOptions {
+                dialect,
+                arcs: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let arced = post(
+            &m,
+            &cl,
+            &PostOptions {
+                dialect,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let n_arcs = arced
+            .gcode
+            .lines()
+            .filter(|l| l.starts_with("G3") || l.starts_with("G2"))
+            .count();
+        assert!(
+            (2..=4).contains(&n_arcs),
+            "{dialect:?}: {n_arcs} arcs\n{}",
+            arced.gcode
+        );
+        assert!(
+            arced.blocks + 300 < plain.blocks,
+            "{} vs {}",
+            arced.blocks,
+            plain.blocks
+        );
+        // Same path and (nearly) the same time when simulated.
+        let a = sim(&m, &arced.gcode, 80.0);
+        let b = sim(&m, &plain.gcode, 80.0);
+        assert!(a.ok && b.ok, "{:#?}", a.issues);
+        assert!(
+            (a.cutting_length_mm - b.cutting_length_mm).abs() < 0.1,
+            "{} vs {}",
+            a.cutting_length_mm,
+            b.cutting_length_mm
+        );
+        assert!((a.cutting_time_s - b.cutting_time_s).abs() / b.cutting_time_s < 0.01);
+        let end = a.trace.unwrap().last().unwrap().tip;
+        assert!(end.distance(Vec3::new(30.0, 0.0, -2.0)) < 1e-3, "{end:?}");
+    }
+}

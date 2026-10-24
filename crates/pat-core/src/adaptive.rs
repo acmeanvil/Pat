@@ -36,6 +36,9 @@ pub struct AdaptiveParams {
     pub max_load: f64,
     /// Safety cap on path steps.
     pub max_steps: usize,
+    /// Round off direction changes: each point may move up to this
+    /// fraction of the stepover toward its neighbours' average (0 = off).
+    pub smoothing: f64,
 }
 
 impl Default for AdaptiveParams {
@@ -47,6 +50,7 @@ impl Default for AdaptiveParams {
             helix_ratio: 0.5,
             max_load: 1.5,
             max_steps: 2_000_000,
+            smoothing: 0.3,
         }
     }
 }
@@ -264,6 +268,8 @@ pub fn adaptive_clear(
             );
             pos = Some(end);
             if pass.pts.len() > 1 {
+                let mut pass = pass;
+                smooth_pass(&st, &mut pass.pts, p.smoothing * p.stepover);
                 passes.push(pass);
             } else if let Some((i, j)) = allowed.cell(at[0], at[1]) {
                 // Could not move from here: never start here again.
@@ -345,6 +351,53 @@ fn run_pass(
         },
         p,
     )
+}
+
+/// Laplacian smoothing of a cut pass. Interior points move toward the
+/// average of their neighbours by at most `max_shift` (mm) from where they
+/// were cut, and only where the tool may go. End points stay put, so links
+/// and entries still join up.
+fn smooth_pass(st: &State, pts: &mut [[f64; 2]], max_shift: f64) {
+    if max_shift <= 0.0 || pts.len() < 3 {
+        return;
+    }
+    let orig: Vec<[f64; 2]> = pts.to_vec();
+    for _ in 0..4 {
+        for i in 1..pts.len() - 1 {
+            let avg = [
+                (pts[i - 1][0] + pts[i + 1][0]) * 0.5,
+                (pts[i - 1][1] + pts[i + 1][1]) * 0.5,
+            ];
+            let mut q = [
+                pts[i][0] + 0.5 * (avg[0] - pts[i][0]),
+                pts[i][1] + 0.5 * (avg[1] - pts[i][1]),
+            ];
+            // Clamp to the allowed shift from the original point.
+            let (dx, dy) = (q[0] - orig[i][0], q[1] - orig[i][1]);
+            let d = dx.hypot(dy);
+            if d > max_shift {
+                q = [
+                    orig[i][0] + dx / d * max_shift,
+                    orig[i][1] + dy / d * max_shift,
+                ];
+            }
+            if st.segment_allowed(pts[i - 1], q) && st.segment_allowed(q, pts[i + 1]) {
+                pts[i] = q;
+            }
+        }
+    }
+}
+
+/// Largest change of direction between consecutive segments (degrees).
+pub fn max_turn_deg(pts: &[[f64; 2]]) -> f64 {
+    pts.windows(3)
+        .map(|w| {
+            let a = (w[1][1] - w[0][1]).atan2(w[1][0] - w[0][0]);
+            let b = (w[2][1] - w[1][1]).atan2(w[2][0] - w[1][0]);
+            let d = (b - a).rem_euclid(std::f64::consts::TAU);
+            d.min(std::f64::consts::TAU - d).to_degrees()
+        })
+        .fold(0.0, f64::max)
 }
 
 /// Breadth-first search through cleared, allowed cells from `from` to a
@@ -652,6 +705,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn smoothing_rounds_corners() {
+        let (allowed, material) = pocket(0.25);
+        let raw = AdaptiveParams {
+            tool_radius: 5.0,
+            stepover: 1.5,
+            smoothing: 0.0,
+            ..Default::default()
+        };
+        let smooth = AdaptiveParams {
+            smoothing: 0.3,
+            ..raw.clone()
+        };
+        let turn = |r: &AdaptiveResult| {
+            let v: Vec<f64> = r
+                .passes
+                .iter()
+                .filter(|p| p.kind == PassKind::Cut)
+                .map(|p| max_turn_deg(&p.pts))
+                .collect();
+            v.iter().sum::<f64>() / v.len() as f64
+        };
+        let a = adaptive_clear(&allowed, &material, &raw);
+        let b = adaptive_clear(&allowed, &material, &smooth);
+        assert!(
+            turn(&b) < 0.8 * turn(&a),
+            "mean worst turn {} vs {}",
+            turn(&b),
+            turn(&a)
+        );
+        assert!(b.uncut_reachable_area < 0.5);
     }
 
     #[test]

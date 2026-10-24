@@ -96,56 +96,100 @@ fn replay(m: &MachineDef, moves: Vec<ClMove>) -> Report {
 
 #[test]
 fn rotary_roughing_a_square_bar_from_round_stock() {
-    let (m, part, mut stock, f) = setup();
-    let initial = stock.volume();
-    let r = rotary_rough(
-        &[&part],
-        &[(25.0, 3.0), (45.0, 15.0)],
-        &mut stock,
-        &f,
-        m.wcs_origin,
-        &params(),
-    );
-    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
-    assert!(r.levels.len() >= 2, "{:?}", r.levels);
-    // The flats of the bar sit at radius 8 (+0.3 leave): a level lands there.
-    assert!(
-        r.levels.iter().any(|&l| (l - 8.3).abs() < 0.3),
-        "{:?}",
-        r.levels
-    );
-    // Most of the waste is gone, the bar is intact.
-    let part_vol = 40.0 * 16.0 * 16.0;
-    assert!(
-        r.remaining_mm3 > part_vol - 400.0,
-        "{} left",
-        r.remaining_mm3
-    );
-    assert!(
-        r.removed_mm3 > 0.5 * (initial - part_vol),
-        "removed {} of {}",
-        r.removed_mm3,
-        initial - part_vol
-    );
-    // Continuous 4-axis: the A axis keeps turning.
-    let unwound = unwrap(&r.moves, &f, m.wcs_origin, 10.0);
-    let span = unwound
-        .iter()
-        .map(|p| p[1])
-        .fold(f64::NEG_INFINITY, f64::max)
-        / 10.0;
-    assert!(
-        span > 10.0 * std::f64::consts::TAU,
-        "only {:.1} turns",
-        span / std::f64::consts::TAU
-    );
-
-    let rep = replay(&m, r.moves);
-    assert!(
-        rep.ok,
-        "{:#?}",
-        rep.issues.iter().take(8).collect::<Vec<_>>()
-    );
+    use pat_core::rotary::RotaryPattern;
+    for pattern in [RotaryPattern::Adaptive, RotaryPattern::Helical] {
+        let (m, part, mut stock, f) = setup();
+        let initial = stock.volume();
+        let p = RotaryParams {
+            pattern,
+            stepover: if pattern == RotaryPattern::Helical {
+                2.5
+            } else {
+                1.0
+            },
+            ..params()
+        };
+        let r = rotary_rough(
+            &[&part],
+            &[(25.0, 3.0), (45.0, 15.0)],
+            &mut stock,
+            &f,
+            m.wcs_origin,
+            &p,
+        );
+        assert!(r.warnings.is_empty(), "{pattern:?}: {:?}", r.warnings);
+        assert!(r.levels.len() >= 2, "{:?}", r.levels);
+        // The flats of the bar sit at radius 8 (+0.3 leave): a level lands there.
+        assert!(
+            r.levels.iter().any(|&l| (l - 8.3).abs() < 0.3),
+            "{:?}",
+            r.levels
+        );
+        // Never deeper than the bar needs: the held stock beyond its ends stays.
+        assert!(r.levels.iter().all(|&l| l > 7.5), "{:?}", r.levels);
+        let o = m.wcs_origin;
+        for x in [-24.0, 24.0] {
+            assert!(
+                stock.material_at(Vec3::new(x, 0.0, 9.0) + o),
+                "{pattern:?}: held end at x {x} was cut"
+            );
+        }
+        // Most of the waste is gone, the bar is intact.
+        let part_vol = 40.0 * 16.0 * 16.0;
+        assert!(
+            r.remaining_mm3 > part_vol - 400.0,
+            "{pattern:?}: {} left",
+            r.remaining_mm3
+        );
+        assert!(
+            r.removed_mm3 > 0.5 * (initial - part_vol),
+            "{pattern:?}: removed {} of {}",
+            r.removed_mm3,
+            initial - part_vol
+        );
+        match pattern {
+            RotaryPattern::Helical => {
+                // Continuous 4-axis: the A axis keeps turning.
+                let unwound = unwrap(&r.moves, &f, m.wcs_origin, 10.0);
+                let span = unwound
+                    .iter()
+                    .map(|p| p[1])
+                    .fold(f64::NEG_INFINITY, f64::max)
+                    / 10.0;
+                assert!(
+                    span > 10.0 * std::f64::consts::TAU,
+                    "only {:.1} turns",
+                    span / std::f64::consts::TAU
+                );
+            }
+            RotaryPattern::Adaptive => {
+                assert!(
+                    r.overload_fraction < 0.05,
+                    "overloaded steps: {:.1}%",
+                    r.overload_fraction * 100.0
+                );
+                // Feed control varies the feed.
+                let feeds: Vec<f64> = r
+                    .moves
+                    .iter()
+                    .filter_map(|mv| match mv {
+                        ClMove::Feed { feed, .. } => Some(*feed),
+                        _ => None,
+                    })
+                    .collect();
+                let (lo, hi) = feeds
+                    .iter()
+                    .fold((f64::INFINITY, 0.0f64), |a, &v| (a.0.min(v), a.1.max(v)));
+                assert!(hi > 1.2 * lo, "feeds {lo}..{hi}");
+            }
+        }
+        let rep = replay(&m, r.moves);
+        assert!(
+            rep.ok,
+            "{pattern:?}: {:#?}",
+            rep.issues.iter().take(8).collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]

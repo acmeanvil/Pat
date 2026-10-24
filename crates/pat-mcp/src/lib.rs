@@ -18,7 +18,8 @@ Pat is an open-source 3/4/5-axis CAM engine. Typical workflow:
 1. load_machine (e.g. machines/trunnion-ac.toml) and load_scene (tools, part, stock, fixtures).
 2. describe_setup to see axes, limits, tools and bodies.
 3. Plan: plan_orientations for 3+2 setups; tilt to explain tool access at a point.
-4. Generate: rough (axis or auto 3+2), rotary (4th axis), surface_finish (5-axis, tool-axis control), swarf.
+4. Generate: rough (adaptive, axis or auto 3+2), trochoidal_slot, rotary (4th axis), surface_finish (5-axis,
+   tool-axis control), swarf. Roughing adjusts feed to the measured load and smooths corners; posts fit arcs.
 5. Every generated program comes back with `verified` and a `verification` report (collisions, gouges,
    axis limits, singularities, cycle time) plus a remedy per issue kind. Explain the issues to the user in
    shop terms and change parameters to fix them. Do not hide or downplay errors.
@@ -76,6 +77,12 @@ pub fn tool_list() -> Value {
         {"name": "swarf", "description": "5-axis swarf (flank) milling of a ruled wall given bottom and top rails. Reports the deviation on twisted walls. Posted and verified.",
          "inputSchema": schema(json!({"tool": {"type": "integer"}, "bottom": {"type": "array", "items": p3}, "top": {"type": "array", "items": p3},
             "params": params("SwarfParams (side left/right, passes, depth_step, leave, tip_offset, step, feed)"), "dialect": dialect}), &["tool", "bottom", "top"])},
+        {"name": "trochoidal_slot", "description": "High-speed trochoidal slotting: small climb-milling loops advancing along a slot centre line, full depth at a light radial load. Reports the measured engagement. Posted and verified (loops become G2/G3 arcs).",
+         "inputSchema": schema(json!({"tool": {"type": "integer"},
+            "centerline": {"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "description": "slot centre line, [x, y] points (WCS)"},
+            "width": {"type": "number"}, "z_top": {"type": "number"}, "z_bottom": {"type": "number"},
+            "params": params("SlotParams (pitch = advance per loop, stepdown, leave, step, feed, return_feed, open_start)"), "dialect": dialect}),
+            &["tool", "centerline", "width", "z_top", "z_bottom"])},
         {"name": "tilt", "description": "Smallest tilt from a preferred tool axis that reaches a point without collision, with an explanation of what blocks the preferred axis.",
          "inputSchema": schema(json!({"tool": {"type": "integer"}, "tip": p3, "axis": dir, "options": params("TiltOptions (margin, max_tilt_deg)")}), &["tool", "tip"])},
         {"name": "inverse_kinematics", "description": "All machine joint solutions for a tool tip and axis (WCS), with limit and singularity flags.",
@@ -149,6 +156,35 @@ impl Server {
                     .and_then(points)
                     .ok_or("top must be a list of [x, y, z]")?;
                 s.swarf(tool()?, bottom, top, a.get("params"), dialect)
+            }
+            "trochoidal_slot" => {
+                let line: Vec<[f64; 2]> = a
+                    .get("centerline")
+                    .and_then(Value::as_array)
+                    .ok_or("centerline must be a list of [x, y]")?
+                    .iter()
+                    .map(|p| {
+                        let v = p
+                            .as_array()
+                            .filter(|v| v.len() == 2)
+                            .ok_or("centerline points must be [x, y]")?;
+                        Ok([v[0].as_f64().unwrap_or(0.0), v[1].as_f64().unwrap_or(0.0)])
+                    })
+                    .collect::<Result<_, String>>()?;
+                let num = |k: &str| {
+                    a.get(k)
+                        .and_then(Value::as_f64)
+                        .ok_or(format!("missing '{k}'"))
+                };
+                s.trochoidal_slot(
+                    tool()?,
+                    line,
+                    num("width")?,
+                    num("z_top")?,
+                    num("z_bottom")?,
+                    a.get("params"),
+                    dialect,
+                )
             }
             "tilt" => {
                 let tip = a.get("tip").and_then(vec3).ok_or("tip must be [x, y, z]")?;

@@ -345,12 +345,50 @@ Open items from the survey that still need a real Fusion session:
 - custom-graphics performance on very large toolpaths;
 - Personal-tier terms for writing G-code from an add-in.
 
+## High-speed machining additions (done)
+
+- **Load-based feed control** (`rough::load_feeds`). The load measured by
+  adaptive clearing at every point sets the feed.
+  - Light cuts speed up by the chip-thinning ratio for constant chip
+    thickness.
+  - Overloads slow down in proportion to the extra load.
+  - Changes are clamped to 0.4–2×, smoothed over neighbouring points, and
+    never smoothed away on an overload.
+  - It is on by default in 3-axis, 3+2 and 4-axis adaptive roughing.
+- **Path smoothing** (`AdaptiveParams::smoothing`). Corners are rounded by
+  Laplacian smoothing that moves points at most 30% of the stepover and only
+  within allowed space.
+- **Arc fitting in the post** (`PostOptions::arcs`). Runs of feed moves on a
+  circle become G2/G3 in both dialects.
+  - Conditions: constant rotaries and Z, points within the tolerance, chords
+    within `arc_sagitta`, a monotonic sweep under 270° and a consistent feed.
+  - I/J are measured from the rounded start, and G93 times are summed so
+    cycle time is unchanged.
+- **Trochoidal slotting** (`slot`, `pat slot`, MCP `trochoidal_slot`).
+  Counter-clockwise (climb) loops advance along any polyline centre line.
+  - It supports depth levels, alternating, mirrored directions, open-end or
+    helix entry, and a faster feed on the non-cutting return half.
+  - The radial engagement is measured from the simulated cut rather than
+    assumed: about the pitch, e.g. 10% of the diameter instead of 100%
+    slotting.
+- **Constant-engagement 4-axis roughing** (`RotaryPattern::Adaptive`, now the
+  default). Adaptive clearing runs on the cylinder unrolled at each radial
+  level, overlapping the seam, with feed control. Helical remains available.
+
+Verified by replay with collision and stock simulation:
+- the trochoidal through-slot removes exactly the slot volume with no gouges,
+  and most loops are posted as arcs;
+- both 4-axis patterns replay cleanly, and adaptive keeps fewer than 5% of
+  steps above 1.5× load;
+- arc output matches straight-line output in path length and time.
+
 ## Beyond the roadmap
 
 - Validate the add-in in Fusion and read machine definitions from it.
 - Flowline and UV patterns from Fusion B-rep faces; swarf walls picked from
   B-rep edges.
-- Constant-engagement 4-axis roughing and engagement-based feed control.
+- Trochoidal slots picked from Fusion slot features; trochoidal fallback
+  inside adaptive clearing for very narrow channels.
 - Post dialects: Heidenhain (M128, PLANE), Siemens (TRAORI, CYCLE800), Haas
   (G234), G68.2 output for 3+2, rotary unwinding.
 - Dexel or SDF stock for finer verification; material-removal preview.

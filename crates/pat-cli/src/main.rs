@@ -340,8 +340,44 @@ enum Cmd {
         /// Tool-tip tolerance for linearisation (mm).
         #[arg(long, default_value_t = 0.005)]
         tolerance: f64,
+        /// Write straight lines only (no G2/G3 arc fitting).
+        #[arg(long)]
+        no_arcs: bool,
         #[arg(short, long)]
         output: Option<PathBuf>,
+    },
+    /// High-speed trochoidal slotting along a centre line.
+    Slot {
+        #[arg(short, long)]
+        machine: PathBuf,
+        /// Scene giving the tool geometry (and collision setup).
+        #[arg(long)]
+        scene: Option<PathBuf>,
+        #[arg(long, default_value_t = 1)]
+        tool: u32,
+        /// Cutter diameter when no scene gives the tool.
+        #[arg(long, default_value_t = 8.0)]
+        diameter: f64,
+        /// Centre line points "x,y;x,y;..." (WCS, mm).
+        #[arg(long, allow_hyphen_values = true)]
+        line: String,
+        #[arg(long)]
+        width: f64,
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        z_top: f64,
+        #[arg(long, allow_hyphen_values = true)]
+        z_bottom: f64,
+        /// Advance per loop (mm).
+        #[arg(long, default_value_t = 0.8)]
+        pitch: f64,
+        #[arg(long, default_value_t = 2500.0)]
+        feed: f64,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        gcode: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = DialectArg::LinuxcncJoint)]
+        dialect: DialectArg,
     },
     /// Forward kinematics: joint values → tool tip and axis.
     Fk {
@@ -631,6 +667,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             machine,
             dialect,
             tolerance,
+            no_arcs,
             output,
         } => {
             let m = load_machine(&machine)?;
@@ -642,6 +679,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     DialectArg::FanucTcp => Dialect::FanucTcp,
                 },
                 tolerance,
+                arcs: !no_arcs,
                 ..Default::default()
             };
             let out = post(&m, &prog, &opts).map_err(|e| e.to_string())?;
@@ -1130,6 +1168,91 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     diameter: Some(cutter.radius * 2.0),
                 },
                 spindle_rpm: Some(rpm),
+                coolant: true,
+                moves: r.moves,
+            };
+            emit_program(&m, &cl, output, gcode, dialect)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Slot {
+            machine,
+            scene,
+            tool,
+            diameter,
+            line,
+            width,
+            z_top,
+            z_bottom,
+            pitch,
+            feed,
+            output,
+            gcode,
+            dialect,
+        } => {
+            let m = load_machine(&machine)?;
+            let (cutter, len) = match &scene {
+                Some(sc) => {
+                    let w = load_world(&machine, &m, Some(sc))?;
+                    let a = w
+                        .tool(tool)
+                        .ok_or_else(|| format!("tool T{tool} is not in the scene"))?;
+                    (
+                        a.cutter_shape().ok_or("the tool has no cutter section")?,
+                        a.def.gauge_length,
+                    )
+                }
+                None => (
+                    pat_core::stock::CutterShape::flat(diameter, 30.0),
+                    m.default_tool_length,
+                ),
+            };
+            let pts: Vec<[f64; 2]> = line
+                .split(';')
+                .filter(|p| !p.trim().is_empty())
+                .map(|p| {
+                    let v: Vec<f64> = p
+                        .split(',')
+                        .map(|x| x.trim().parse::<f64>())
+                        .collect::<Result<_, _>>()
+                        .map_err(|e| e.to_string())?;
+                    if v.len() != 2 {
+                        return Err("each point must be x,y".to_string());
+                    }
+                    Ok([v[0], v[1]])
+                })
+                .collect::<Result<_, String>>()?;
+            let sp = pat_core::slot::SlotParams {
+                cutter,
+                width,
+                z_top,
+                z_bottom,
+                pitch,
+                feed,
+                return_feed: feed * 2.0,
+                ..Default::default()
+            };
+            let r = pat_core::slot::trochoidal_slot(&pts, &sp);
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            if r.moves.is_empty() {
+                return Err("no toolpath".into());
+            }
+            eprintln!(
+                "{} loops of radius {:.2} mm, max radial engagement {:.3} mm ({:.0}% of the diameter)",
+                r.loops,
+                r.loop_radius,
+                r.max_engagement_mm,
+                r.max_engagement_ratio * 100.0
+            );
+            let cl = ClProgram {
+                name: format!("trochoidal slot T{tool}"),
+                tool: pat_core::post::ClTool {
+                    number: tool,
+                    length: len,
+                    diameter: Some(cutter.radius * 2.0),
+                },
+                spindle_rpm: Some(12000.0),
                 coolant: true,
                 moves: r.moves,
             };
