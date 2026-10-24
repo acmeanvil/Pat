@@ -25,6 +25,7 @@ use pat_core::orient::{select_orientations, OrientOptions};
 use pat_core::plan::{auto_rough, stock_from_world, AutoRoughParams};
 use pat_core::post::ClTool;
 use pat_core::post::{post as post_cl, ClProgram, PostOptions};
+use pat_core::rotary::{rotary_finish, rotary_rough, wrap, RotaryFrame, RotaryParams};
 use pat_core::rough::{machining_frame, rough_with, RoughParams};
 use pat_core::sim::{simulate, SimOptions};
 use pat_core::{Kinematics, MachineDef, Pose};
@@ -235,6 +236,98 @@ fn rough(
     serde_json::to_string(&serde_json::json!({ "cl": cl, "summary": summary })).map_err(err)
 }
 
+/// Continuous 4-axis roughing (`mode` = "rough") or finishing ("finish")
+/// around the machine's rotary table axis. Returns {"cl", "summary"}.
+#[pyfunction]
+#[pyo3(signature = (machine_src, scene_toml, tool, mode="rough", params_json=None, scene_dir=None, machine_dir=None))]
+#[allow(clippy::too_many_arguments)]
+fn rotary(
+    machine_src: &str,
+    scene_toml: &str,
+    tool: u32,
+    mode: &str,
+    params_json: Option<&str>,
+    scene_dir: Option<&str>,
+    machine_dir: Option<&str>,
+) -> PyResult<String> {
+    let m = machine(machine_src)?;
+    let f = RotaryFrame::from_machine(&m)
+        .ok_or_else(|| err("the machine needs exactly one rotary axis on the table"))?;
+    let w = world(&m, Some(scene_toml), scene_dir, machine_dir)?;
+    let asm = w
+        .tool(tool)
+        .ok_or_else(|| err(format!("tool T{tool} is not in the scene")))?;
+    let cutter = asm
+        .cutter_shape()
+        .ok_or_else(|| err(format!("tool T{tool} has no cutter section")))?;
+    let k = kin_for_tool(&m, &w, tool)?;
+    let sections = w.head_sections(&k, Some(tool));
+    let mut rp: RotaryParams = opts(params_json)?;
+    rp.cutter = cutter;
+    let parts: Vec<&Mesh> = w
+        .table_meshes(Role::Part)
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    let r = match mode {
+        "rough" => {
+            let mut stock =
+                stock_from_world(&w, rp.dx).ok_or_else(|| err("the scene has no stock body"))?;
+            rotary_rough(&parts, &sections, &mut stock, &f, m.wcs_origin, &rp)
+        }
+        "finish" => rotary_finish(&parts, &sections, &f, m.wcs_origin, &rp),
+        other => {
+            return Err(err(format!(
+                "mode must be \"rough\" or \"finish\", not {other:?}"
+            )))
+        }
+    };
+    let cl = ClProgram {
+        name: format!("rotary {mode} T{tool}"),
+        tool: ClTool {
+            number: tool,
+            length: asm.def.gauge_length,
+            diameter: Some(cutter.radius * 2.0),
+        },
+        spindle_rpm: None,
+        coolant: true,
+        moves: r.moves.clone(),
+    };
+    let summary = serde_json::json!({
+        "levels": r.levels, "cut_length_mm": r.cut_length_mm, "removed_mm3": r.removed_mm3,
+        "remaining_mm3": r.remaining_mm3, "warnings": r.warnings,
+    });
+    serde_json::to_string(&serde_json::json!({ "cl": cl, "summary": summary })).map_err(err)
+}
+
+/// Wrap 2D paths ([[u, v], ...] lists; u axial, v arc length) onto a
+/// cylinder of `radius`, cutting `depth` deep. Returns CL moves as JSON.
+#[pyfunction]
+#[pyo3(signature = (machine_src, paths_json, radius, depth, feed=600.0))]
+fn wrap_paths(
+    machine_src: &str,
+    paths_json: &str,
+    radius: f64,
+    depth: f64,
+    feed: f64,
+) -> PyResult<String> {
+    let m = machine(machine_src)?;
+    let f = RotaryFrame::from_machine(&m)
+        .ok_or_else(|| err("the machine needs exactly one rotary axis on the table"))?;
+    let paths: Vec<Vec<[f64; 2]>> = serde_json::from_str(paths_json).map_err(err)?;
+    serde_json::to_string(&wrap(
+        &paths,
+        &f,
+        m.wcs_origin,
+        radius,
+        depth,
+        0.5,
+        feed,
+        3.0,
+    ))
+    .map_err(err)
+}
+
 /// Reachability map: directions within `cone_deg` of `axis` and whether
 /// each reaches `tip` without collision.
 #[pyfunction]
@@ -315,6 +408,8 @@ fn pat_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reach, m)?)?;
     m.add_function(wrap_pyfunction!(orient, m)?)?;
     m.add_function(wrap_pyfunction!(rough, m)?)?;
+    m.add_function(wrap_pyfunction!(rotary, m)?)?;
+    m.add_function(wrap_pyfunction!(wrap_paths, m)?)?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(inverse, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;

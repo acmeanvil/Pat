@@ -132,70 +132,6 @@ pub fn select_orientations(
     let size = (bb.max - bb.min).norm().max(1e-3);
     let total: f64 = (0..mesh.len()).map(|t| tri_area(&mesh.tri(t))).sum();
 
-    // 1. Area-weighted samples with outward normals.
-    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
-    let mut rand = move || {
-        rng ^= rng << 13;
-        rng ^= rng >> 7;
-        rng ^= rng << 17;
-        (rng >> 11) as f64 / (1u64 << 53) as f64
-    };
-    let cum: Vec<f64> = (0..mesh.len())
-        .scan(0.0, |acc, t| {
-            *acc += tri_area(&mesh.tri(t));
-            Some(*acc)
-        })
-        .collect();
-    let eps = size * 1e-4;
-    let mut samples = Vec::with_capacity(o.samples);
-    let mut ignored = 0.0;
-    let mut internal = 0.0;
-    let w = total / o.samples.max(1) as f64;
-    let down_cos = o.ignore_down_deg.to_radians().cos();
-    for _ in 0..o.samples.max(1) {
-        let x = rand() * total;
-        let t = cum.partition_point(|&c| c < x).min(mesh.len() - 1);
-        let tri = mesh.tri(t);
-        let (mut u, mut v) = (rand(), rand());
-        if u + v > 1.0 {
-            u = 1.0 - u;
-            v = 1.0 - v;
-        }
-        let p = tri[0] + (tri[1] - tri[0]) * u + (tri[2] - tri[0]) * v;
-        let Some(mut n) = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalized() else {
-            continue;
-        };
-        let (front, back) = (inside(p + n * eps), inside(p - n * eps));
-        if front && back {
-            internal += w;
-            continue; // face between touching parts, not real surface
-        }
-        if front {
-            n = -n;
-        }
-        if o.ignore_down_deg > 0.0 && n.dot(-Vec3::Z) >= down_cos {
-            ignored += w;
-            continue;
-        }
-        samples.push(Sample { p, n, w });
-    }
-    let considered: f64 = samples.iter().map(|s| s.w).sum::<f64>().max(1e-12);
-
-    // 2. Candidate directions.
-    let mut dirs = cap_directions(Vec3::Z, o.max_tilt_deg, o.candidates);
-    for d in [Vec3::Z, Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y] {
-        dirs.push(d);
-    }
-    dirs.extend(dominant_normals(&samples, 0.02));
-    dirs.retain(|d| d.angle_to(Vec3::Z).to_degrees() <= o.max_tilt_deg + 1e-9);
-    let mut uniq: Vec<Vec3> = Vec::new();
-    for d in dirs {
-        if uniq.iter().all(|u| u.angle_to(d) > 0.5f64.to_radians()) {
-            uniq.push(d);
-        }
-    }
-
-    // 3. Usable directions and what each sees.
     let centre = (bb.min + bb.max) * 0.5;
     // A direction is usable if the machine reaches the part centre and every
     // bounding-box corner with the tool along it, without the tool or machine
@@ -238,6 +174,84 @@ pub fn select_orientations(
         }
         Some(main.joints)
     };
+    // Faces pointing down are only ignored (as the side the part rests on)
+    // when the machine cannot point the tool up at them anyway. On a 4th
+    // axis or a trunnion that tilts past 90°, they are real surface.
+    let can_reach_underside = std::iter::once(-Vec3::Z)
+        .chain([
+            Vec3::new(0.0, 0.5, -0.866),
+            Vec3::new(0.0, -0.5, -0.866),
+            Vec3::new(0.5, 0.0, -0.866),
+            Vec3::new(-0.5, 0.0, -0.866),
+        ])
+        .chain(cap_directions(-Vec3::Z, 60.0, 24))
+        .any(|d| reach_of(d).is_some());
+    let ignore_down = o.ignore_down_deg > 0.0 && !can_reach_underside;
+
+    // 1. Area-weighted samples with outward normals.
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rand = move || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        (rng >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let cum: Vec<f64> = (0..mesh.len())
+        .scan(0.0, |acc, t| {
+            *acc += tri_area(&mesh.tri(t));
+            Some(*acc)
+        })
+        .collect();
+    let eps = size * 1e-4;
+    let mut samples = Vec::with_capacity(o.samples);
+    let mut ignored = 0.0;
+    let mut internal = 0.0;
+    let w = total / o.samples.max(1) as f64;
+    let down_cos = o.ignore_down_deg.to_radians().cos();
+    for _ in 0..o.samples.max(1) {
+        let x = rand() * total;
+        let t = cum.partition_point(|&c| c < x).min(mesh.len() - 1);
+        let tri = mesh.tri(t);
+        let (mut u, mut v) = (rand(), rand());
+        if u + v > 1.0 {
+            u = 1.0 - u;
+            v = 1.0 - v;
+        }
+        let p = tri[0] + (tri[1] - tri[0]) * u + (tri[2] - tri[0]) * v;
+        let Some(mut n) = (tri[1] - tri[0]).cross(tri[2] - tri[0]).normalized() else {
+            continue;
+        };
+        let (front, back) = (inside(p + n * eps), inside(p - n * eps));
+        if front && back {
+            internal += w;
+            continue; // face between touching parts, not real surface
+        }
+        if front {
+            n = -n;
+        }
+        if ignore_down && n.dot(-Vec3::Z) >= down_cos {
+            ignored += w;
+            continue;
+        }
+        samples.push(Sample { p, n, w });
+    }
+    let considered: f64 = samples.iter().map(|s| s.w).sum::<f64>().max(1e-12);
+
+    // 2. Candidate directions.
+    let mut dirs = cap_directions(Vec3::Z, o.max_tilt_deg, o.candidates);
+    for d in [Vec3::Z, Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y] {
+        dirs.push(d);
+    }
+    dirs.extend(dominant_normals(&samples, 0.02));
+    dirs.retain(|d| d.angle_to(Vec3::Z).to_degrees() <= o.max_tilt_deg + 1e-9);
+    let mut uniq: Vec<Vec3> = Vec::new();
+    for d in dirs {
+        if uniq.iter().all(|u| u.angle_to(d) > 0.5f64.to_radians()) {
+            uniq.push(d);
+        }
+    }
+
+    // 3. Usable directions and what each sees.
     let mut usable: Vec<(Vec3, Vec<f64>, Vec<bool>)> = Vec::new();
     for d in uniq {
         let Some(joints) = reach_of(d) else { continue };

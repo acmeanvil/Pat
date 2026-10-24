@@ -31,6 +31,7 @@ pub mod plan;
 pub mod planner;
 pub mod post;
 pub mod raster;
+pub mod rotary;
 pub mod rough;
 pub mod sim;
 pub mod stock;

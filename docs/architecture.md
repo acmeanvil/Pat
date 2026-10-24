@@ -191,22 +191,64 @@ Known limits:
 - 3+2 transitions assume the safe sphere is free of fixtures.
 - 4- and 5-axis simultaneous roughing are not covered.
 
+## Milestone 4: continuous 4-axis (done)
+
+- **Cylindrical planning** (`rotary`), around the machine's table rotary axis
+  (found automatically):
+  - the part's radius at each (x, θ);
+  - the outer radius of the remaining stock, from the voxels;
+  - a rotary drop-cutter giving the lowest safe tip radius for a radial
+    cutter (flat, ball or bull nose, grown by the stock to leave), plus
+    shank, holder and spindle housing.
+- **Rotary roughing.** Radial levels are cut with continuous helical passes,
+  X advancing while A spins.
+  - Levels are added at cylindrical areas, and the direction alternates per
+    level.
+  - The tool retracts radially around places it may not go.
+  - The stock is updated as it cuts, so rest machining works.
+  - It never cuts outside the part's axial range (or a given `x_range`), so
+    the stock held by the chuck and tailstock is never parted off.
+- **Rotary finishing.** A fine helix rides the safe surface.
+- **Wrap / unwrap.** 2D paths (u axial, v arc length) become 4-axis cuts on a
+  cylinder, and back again for previews.
+- **Indexed 4-axis (4+1).** This works through `auto_rough`: orientation
+  selection keeps only directions the machine can reach (radial ones on a 4th
+  axis). Downward faces count as real surface whenever the machine can point
+  at them.
+- **Front ends.** `pat rotary rough|finish`, `pat wrap` and Python `rotary`
+  and `wrap_paths`. Examples: `examples/square-bar-4th.toml` and
+  `examples/wrap-text.json`.
+
+Verified by posting (LinuxCNC joint dialect with adaptive linearisation and
+G93) and replaying on `machines/vmc-4th-a.toml` with collision and stock
+simulation: zero gouges, rapids into stock, rubs or collisions.
+
+Known limits:
+- Continuous helices wind the A axis through many turns (about 99 turns in
+  the bar example). Controls need rotary rollover configured, or LinuxCNC
+  wrapped-rotary mode; the post does not unwind.
+- Roughing passes are helical at full step-down rather than
+  constant-engagement.
+- Finishing follows the conservative raster surface, so accuracy is about
+  one grid cell.
+- With 3+2 or indexed roughing on a 4th axis, model the chuck and tailstock
+  as fixtures to protect the held stock.
+
 ## Roadmap
 
-1. **4-axis.** Continuous rotary roughing and finishing, plus wrap and unwrap.
-2. **5-axis finishing.**
+1. **5-axis finishing.**
    - Swarf, multi-axis flowline and surface-normal strategies with lead/lag and
      tilt control.
    - Tool-axis smoothing.
    - One application pack: port machining is the first candidate.
-3. **AI agent integration.**
+2. **AI agent integration.**
    - An MCP server exposing `machine`, `check`, `post`, `ik`, and later `plan`,
      `collide` and `reach` as tools.
    - The agent proposes setups and orientations, and explains simulator
      findings in shop terms.
    - The agent never bypasses verification: every agent-produced program goes
      through `check`.
-4. **Fusion adapter.**
+3. **Fusion adapter.**
    - The add-in reads the machine definition (`adsk.cam.Machine`), BRep/mesh,
      stock and tools.
    - It runs `pat` through the Python wheel and previews toolpaths with custom

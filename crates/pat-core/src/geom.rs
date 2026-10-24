@@ -586,6 +586,32 @@ pub fn segment_hits_triangle(p0: Vec3, p1: Vec3, t: &[Vec3; 3]) -> bool {
     (0.0..=1.0).contains(&w)
 }
 
+/// Where segment `p0`–`p1` crosses a triangle, as a fraction along the
+/// segment (Möller–Trumbore), if it does.
+pub fn segment_triangle_param(p0: Vec3, p1: Vec3, t: &[Vec3; 3]) -> Option<f64> {
+    let d = p1 - p0;
+    let e1 = t[1] - t[0];
+    let e2 = t[2] - t[0];
+    let h = d.cross(e2);
+    let a = e1.dot(h);
+    if a.abs() < 1e-14 {
+        return None;
+    }
+    let f = 1.0 / a;
+    let s = p0 - t[0];
+    let u = f * s.dot(h);
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = s.cross(e1);
+    let v = f * d.dot(q);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    let w = f * e2.dot(q);
+    (0.0..=1.0).contains(&w).then_some(w)
+}
+
 /// Two triangles intersect when an edge of one crosses the other.
 /// (Exactly coplanar overlaps are not reported.)
 pub fn triangles_intersect(a: &[Vec3; 3], b: &[Vec3; 3]) -> bool {

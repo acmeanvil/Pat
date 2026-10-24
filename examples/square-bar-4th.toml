@@ -1,0 +1,25 @@
+# Continuous 4-axis demo for machines/vmc-4th-a.toml: a 16 x 16 square bar
+# turned out of 28 mm round stock.
+#   pat rotary rough  -m machines/vmc-4th-a.toml --scene examples/square-bar-4th.toml --tool 1 --gcode /tmp/bar-rough.ngc
+#   pat check /tmp/bar-rough.ngc -m machines/vmc-4th-a.toml --scene examples/square-bar-4th.toml --stock
+#   pat wrap examples/wrap-text.json -m machines/vmc-4th-a.toml --radius 14 --depth 0.3 --gcode /tmp/engrave.ngc
+
+[[tools]]
+number = 1
+name = "6 mm flat end mill"
+gauge_length = 90.0
+segments = [
+  { kind = "cutter", length = 25.0, diameter = 6.0 },
+  { kind = "shank",  length = 20.0, diameter = 6.0 },
+  { kind = "holder", length = 40.0, diameter = 30.0 },
+]
+
+[[bodies]]
+name = "round stock"
+role = "stock"
+shape = { type = "cylinder", base = [-25.0, 0.0, 0.0], axis = [1.0, 0.0, 0.0], radius = 14.0, height = 50.0 }
+
+[[bodies]]
+name = "square bar"
+role = "part"
+shape = { type = "box", min = [-20.0, -8.0, -8.0], max = [20.0, 8.0, 8.0] }

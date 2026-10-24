@@ -21,6 +21,7 @@ use pat_core::math::Vec3;
 use pat_core::orient::{select_orientations, OrientOptions};
 use pat_core::plan::{auto_rough, stock_from_world, AutoRoughParams};
 use pat_core::post::{post, ClProgram, Dialect, PostOptions};
+use pat_core::rotary::{rotary_finish, rotary_rough, wrap, RotaryFrame, RotaryParams};
 use pat_core::rough::{machining_frame, rough_with, RoughParams};
 use pat_core::sim::{simulate, SimOptions};
 use pat_core::{Kinematics, MachineDef, Pose};
@@ -162,6 +163,67 @@ enum Cmd {
         #[arg(long, value_enum, default_value_t = DialectArg::FanucTcp)]
         dialect: DialectArg,
     },
+    /// Continuous 4-axis roughing or finishing around the machine's rotary
+    /// table axis. Writes CL JSON, or G-code with --gcode.
+    Rotary {
+        #[arg(value_enum)]
+        mode: RotaryMode,
+        #[arg(short, long)]
+        machine: PathBuf,
+        #[arg(long)]
+        scene: PathBuf,
+        #[arg(long)]
+        tool: u32,
+        /// Radial depth per level (roughing, mm).
+        #[arg(long, default_value_t = 2.0)]
+        stepdown: f64,
+        /// Helix pitch: axial advance per turn (mm).
+        #[arg(long, default_value_t = 2.0)]
+        stepover: f64,
+        #[arg(long, default_value_t = 0.3)]
+        leave: f64,
+        /// Axial grid spacing (mm).
+        #[arg(long, default_value_t = 0.5)]
+        dx: f64,
+        /// Angular grid spacing (degrees).
+        #[arg(long, default_value_t = 1.0)]
+        dtheta: f64,
+        #[arg(long, default_value_t = 1500.0)]
+        feed: f64,
+        #[arg(long, default_value_t = 8000.0)]
+        rpm: f64,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        gcode: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = DialectArg::LinuxcncJoint)]
+        dialect: DialectArg,
+    },
+    /// Wrap 2D paths onto a cylinder around the rotary axis (engraving).
+    /// Paths JSON: [[[u, v], ...], ...] with u axial and v arc length (mm).
+    Wrap {
+        paths: PathBuf,
+        #[arg(short, long)]
+        machine: PathBuf,
+        /// Cylinder radius the paths are measured on (mm).
+        #[arg(long)]
+        radius: f64,
+        /// Cut depth below that radius (mm).
+        #[arg(long)]
+        depth: f64,
+        #[arg(long, default_value_t = 1)]
+        tool: u32,
+        #[arg(long)]
+        tool_length: Option<f64>,
+        #[arg(long, default_value_t = 600.0)]
+        feed: f64,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        gcode: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = DialectArg::LinuxcncJoint)]
+        dialect: DialectArg,
+    },
     /// Reachability map: which tool directions around an axis reach a point.
     Reach {
         #[arg(short, long)]
@@ -219,6 +281,12 @@ enum Cmd {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum RotaryMode {
+    Rough,
+    Finish,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum DialectArg {
     LinuxcncJoint,
     FanucTcp,
@@ -272,6 +340,42 @@ fn tool_length_for(world: &World, m: &MachineDef, tool: u32) -> f64 {
     world
         .tool(tool)
         .map_or(m.default_tool_length, |t| t.def.gauge_length)
+}
+
+fn dialect_of(d: DialectArg) -> Dialect {
+    match d {
+        DialectArg::LinuxcncJoint => Dialect::LinuxcncJoint,
+        DialectArg::FanucTcp => Dialect::FanucTcp,
+    }
+}
+
+/// Write CL JSON and/or posted G-code.
+fn emit_program(
+    m: &MachineDef,
+    cl: &ClProgram,
+    output: Option<PathBuf>,
+    gcode: Option<PathBuf>,
+    dialect: DialectArg,
+) -> Result<(), String> {
+    let json = to_json(cl);
+    match output {
+        Some(p) => std::fs::write(&p, json).map_err(|e| format!("{}: {e}", p.display()))?,
+        None if gcode.is_none() => println!("{json}"),
+        None => {}
+    }
+    if let Some(g) = gcode {
+        let opts = PostOptions {
+            dialect: dialect_of(dialect),
+            ..Default::default()
+        };
+        let out = post(m, cl, &opts).map_err(|e| e.to_string())?;
+        for w in out.warnings.iter().take(5) {
+            eprintln!("warning: {w}");
+        }
+        std::fs::write(&g, &out.gcode).map_err(|e| format!("{}: {e}", g.display()))?;
+        eprintln!("wrote {} blocks to {}", out.blocks, g.display());
+    }
+    Ok(())
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -646,6 +750,124 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 std::fs::write(&g, &out.gcode).map_err(|e| format!("{}: {e}", g.display()))?;
                 eprintln!("wrote {} blocks to {}", out.blocks, g.display());
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Rotary {
+            mode,
+            machine,
+            scene,
+            tool,
+            stepdown,
+            stepover,
+            leave,
+            dx,
+            dtheta,
+            feed,
+            rpm,
+            output,
+            gcode,
+            dialect,
+        } => {
+            let m = load_machine(&machine)?;
+            let f = RotaryFrame::from_machine(&m)
+                .ok_or("the machine needs exactly one rotary axis on the table")?;
+            let world = load_world(&machine, &m, Some(&scene))?;
+            let asm = world
+                .tool(tool)
+                .ok_or_else(|| format!("tool T{tool} is not in the scene"))?;
+            let cutter = asm
+                .cutter_shape()
+                .ok_or_else(|| format!("tool T{tool} has no cutter section"))?;
+            let k = Kinematics::new(m.clone(), asm.def.gauge_length).map_err(|e| e.to_string())?;
+            let sections = world.head_sections(&k, Some(tool));
+            let parts: Vec<&pat_core::geom::Mesh> = world
+                .table_meshes(Role::Part)
+                .into_iter()
+                .map(|(_, mesh)| mesh)
+                .collect();
+            if parts.is_empty() {
+                return Err("the scene has no body with role = \"part\"".into());
+            }
+            let rp = RotaryParams {
+                cutter,
+                stepdown,
+                stepover,
+                leave,
+                dx,
+                dtheta_deg: dtheta,
+                feed,
+                plunge_feed: feed * 0.3,
+                ..Default::default()
+            };
+            let r = match mode {
+                RotaryMode::Rough => {
+                    let mut stock = stock_from_world(&world, dx)
+                        .ok_or("the scene has no body with role = \"stock\"")?;
+                    rotary_rough(&parts, &sections, &mut stock, &f, m.wcs_origin, &rp)
+                }
+                RotaryMode::Finish => rotary_finish(&parts, &sections, &f, m.wcs_origin, &rp),
+            };
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            eprintln!(
+                "{} moves, {} levels, cut length {:.0} mm, removed {:.0} mm³",
+                r.moves.len(),
+                r.levels.len(),
+                r.cut_length_mm,
+                r.removed_mm3
+            );
+            let cl = ClProgram {
+                name: format!(
+                    "rotary {} T{tool}",
+                    if matches!(mode, RotaryMode::Rough) {
+                        "rough"
+                    } else {
+                        "finish"
+                    }
+                ),
+                tool: pat_core::post::ClTool {
+                    number: tool,
+                    length: asm.def.gauge_length,
+                    diameter: Some(cutter.radius * 2.0),
+                },
+                spindle_rpm: Some(rpm),
+                coolant: true,
+                moves: r.moves,
+            };
+            emit_program(&m, &cl, output, gcode, dialect)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Wrap {
+            paths,
+            machine,
+            radius,
+            depth,
+            tool,
+            tool_length,
+            feed,
+            output,
+            gcode,
+            dialect,
+        } => {
+            let m = load_machine(&machine)?;
+            let f = RotaryFrame::from_machine(&m)
+                .ok_or("the machine needs exactly one rotary axis on the table")?;
+            let p: Vec<Vec<[f64; 2]>> = serde_json::from_str(&read(&paths)?)
+                .map_err(|e| format!("{}: {e}", paths.display()))?;
+            let moves = wrap(&p, &f, m.wcs_origin, radius, depth, 0.5, feed, 3.0);
+            let cl = ClProgram {
+                name: "wrap".into(),
+                tool: pat_core::post::ClTool {
+                    number: tool,
+                    length: tool_length.unwrap_or(m.default_tool_length),
+                    diameter: None,
+                },
+                spindle_rpm: None,
+                coolant: false,
+                moves,
+            };
+            emit_program(&m, &cl, output, gcode, dialect)?;
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Reach {
