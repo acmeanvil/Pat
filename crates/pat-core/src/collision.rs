@@ -55,6 +55,10 @@ pub struct ToolSegment {
     pub diameter_bottom: Option<f64>,
     #[serde(default)]
     pub diameter_top: Option<f64>,
+    /// Cutter corner radius: 0 (default) for a flat end mill, half the
+    /// diameter for a ball end mill, in between for a bull nose.
+    #[serde(default)]
+    pub corner_radius: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -186,6 +190,39 @@ impl ToolAssembly {
             z += s.length;
         }
         Ok(ToolAssembly { def, cyls })
+    }
+
+    /// Cutting geometry for material removal: radius and corner radius of
+    /// the first cutter section, flute length of all cutter sections.
+    pub fn cutter_shape(&self) -> Option<crate::stock::CutterShape> {
+        let first = self
+            .def
+            .segments
+            .iter()
+            .find(|s| s.kind == SegmentKind::Cutter)?;
+        let d = first.diameter.or(first.diameter_bottom)?;
+        let flute: f64 = self
+            .def
+            .segments
+            .iter()
+            .take_while(|s| s.kind == SegmentKind::Cutter)
+            .map(|s| s.length)
+            .sum();
+        Some(crate::stock::CutterShape {
+            radius: d / 2.0,
+            corner_radius: first.corner_radius.unwrap_or(0.0).clamp(0.0, d / 2.0),
+            flute_length: flute,
+        })
+    }
+
+    /// Non-cutting sections (shank, holder) as tool-frame cylinders
+    /// (z0, height, radius), for rubbing checks against in-process stock.
+    pub fn non_cutting_cylinders(&self) -> Vec<(f64, f64, f64)> {
+        self.cyls
+            .iter()
+            .filter(|c| c.kind != SegmentKind::Cutter)
+            .map(|c| (c.z0, c.height, c.radius))
+            .collect()
     }
 
     /// Cutter diameter (largest cutter section).
@@ -320,6 +357,71 @@ impl World {
 
     pub fn tool(&self, number: u32) -> Option<&ToolAssembly> {
         self.tools.get(&number)
+    }
+
+    /// Meshes of table-mounted bodies with a role, in the table frame (base
+    /// frame with all axes home).
+    pub fn table_meshes(&self, role: Role) -> Vec<(&str, &Mesh)> {
+        self.bodies
+            .iter()
+            .filter(|b| b.role == role)
+            .map(|b| (b.name.as_str(), &b.mesh))
+            .collect()
+    }
+
+    /// Obstacles that stay fixed relative to the part during a 3+2 setup,
+    /// in the table frame: fixtures, plus machine bodies riding on the table
+    /// side (platter, cradle) placed at joints `q`.
+    pub fn setup_obstacles(&self, kin: &Kinematics, q: &[f64]) -> Vec<Mesh> {
+        let table = kin.link("table").unwrap_or(Link::Base);
+        let to_table = kin.link_iso(table, q).inverse();
+        self.bodies
+            .iter()
+            .filter(|b| b.collide)
+            .filter_map(|b| match (b.role, b.group) {
+                (Role::Fixture, _) => Some(b.mesh.clone()),
+                (Role::Machine, Group::Table) => {
+                    Some(b.mesh.transformed(&to_table.then(&kin.link_iso(b.link, q))))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Everything that rides with the tool, as cylinders around the tool
+    /// axis (height of the lower end above the tip, radius): the tool's shank
+    /// and holder sections, then head-mounted machine bodies (spindle housing
+    /// etc.) bounded by their largest radius. Conservative for bodies that are
+    /// not coaxial with the spindle.
+    pub fn head_sections(&self, kin: &Kinematics, tool: Option<u32>) -> Vec<(f64, f64)> {
+        let mut out: Vec<(f64, f64)> = tool
+            .and_then(|t| self.tools.get(&t))
+            .map(|a| {
+                a.non_cutting_cylinders()
+                    .iter()
+                    .map(|&(z0, _, r)| (z0, r))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let home = vec![0.0; kin.axis_count()];
+        let to_tool = kin.link_iso(Link::Tool, &home).inverse();
+        for b in self
+            .bodies
+            .iter()
+            .filter(|b| b.collide && b.group == Group::Head)
+        {
+            let place = to_tool.then(&kin.link_iso(b.link, &home));
+            let (mut z0, mut r) = (f64::INFINITY, 0.0f64);
+            for &v in &b.mesh.vertices {
+                let p = place.apply_point(v);
+                z0 = z0.min(p.z);
+                r = r.max((p.x * p.x + p.y * p.y).sqrt());
+            }
+            if z0 > 0.0 && z0.is_finite() {
+                out.push((z0, r));
+            }
+        }
+        out
     }
 
     pub fn bodies(&self) -> impl Iterator<Item = (&str, Role)> {

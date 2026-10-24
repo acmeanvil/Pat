@@ -18,6 +18,7 @@
 //!   tool directions.
 
 pub mod access;
+pub mod adaptive;
 pub mod collision;
 pub mod gcode;
 pub mod geom;
@@ -25,9 +26,14 @@ pub mod interp;
 pub mod kinematics;
 pub mod machine;
 pub mod math;
+pub mod orient;
+pub mod plan;
 pub mod planner;
 pub mod post;
+pub mod raster;
+pub mod rough;
 pub mod sim;
+pub mod stock;
 pub mod subs;
 
 pub use kinematics::{IkSolution, Kinematics, Pose};

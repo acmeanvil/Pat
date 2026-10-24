@@ -139,32 +139,74 @@ Known limits:
 - Exactly coplanar contact is not reported.
 - Machine-to-machine checks have no clearance margin.
 
+## Milestone 3: 3+2 orientation, adaptive roughing, material removal (done)
+
+- **Material model** (`stock`): a voxel stock with per-block occupancy, cut
+  by flat, ball and bull-nose cutter shapes.
+  - Fixed-axis moves are swept exactly in one pass (an analytic swept-cylinder
+    test); only rounded tips and axis-changing moves are sampled.
+  - `pat check --stock` uses it to report gouges into the part (beyond a
+    tolerance), rapids into stock, shanks or holders rubbing remaining stock,
+    and removed and remaining volume.
+- **Rasters** (`raster`): part height fields in any orientation and a raster
+  drop-cutter for the whole tool assembly:
+  - the shaped cutter;
+  - shank, holder and the spindle housing taken from the machine file;
+  - a fast disk-max filter for large radii;
+  - a 1.5-cell safety margin, so the stock to leave is a guaranteed minimum.
+- **Adaptive clearing** (`adaptive`): constant-engagement steering toward a
+  target cut width.
+  - Material is kept on the climb side.
+  - It travels through cleared space (keep-down links) found with one
+    distance-map search, and enters through open air, a helix or a plunge.
+  - A low-load cleanup phase removes slivers.
+- **Roughing** (`rough`): z-levels plus levels at flat floors, in any fixed
+  orientation.
+  - Material comes from the in-process stock, so rest machining is automatic.
+  - The tool assembly keeps clear of fixtures and of the table-side machine
+    bodies placed at the setup's rotary angles.
+  - Non-cutting sections keep clear of the stock still standing above the cut.
+- **Orientation selection** (`orient`): area-weighted surface samples and
+  visibility. Walls count only where the flute can reach them.
+  - Each direction is checked for machine reachability and collisions at the
+    part corners, then chosen by a greedy area cover that prefers head-on
+    views.
+  - Each setup comes with rotary angles, G68.2 angles and an explanation.
+- **Pipeline** (`plan::auto_rough`): orient, then rough each setup on the
+  stock left by the previous ones, joined by transitions along a safe sphere.
+- **Front ends.** `pat orient`, `pat rough [--axis | --auto] [--gcode]` and
+  `pat check --stock`; Python `orient` and `rough`.
+
+Verified end to end in the tests. Generated programs are posted and replayed
+with collision and stock simulation on the trunnion model, including its
+spindle housing, cradle and platter, with zero gouges, rapids into stock,
+rubs or collisions. Rest machining cuts less than 60% of what a fresh run with
+the small tool would.
+
+Known limits:
+- Raster accuracy is about one cell (0.25 to 0.5 mm typical), so walls end up
+  oversized by up to 1.5 cells on top of the stock to leave.
+- Roughing does not yet adjust feed to engagement.
+- No finishing strategies yet.
+- 3+2 transitions assume the safe sphere is free of fixtures.
+- 4- and 5-axis simultaneous roughing are not covered.
+
 ## Roadmap
 
-1. **3+2 and HSM roughing.**
-   - Automatic 3+2 orientation selection from the reachability map.
-   - Adaptive (constant-engagement) clearing in 2.5D and 3D (z-level), with
-     engagement-based feed control.
-   - Rest machining.
-   - A material-removal model (dexel or voxel stock) for in-process stock,
-     gouge checks and rapids through remaining stock.
-
-   All GPL CAM code is used for reference only: algorithms are reimplemented
-   from published papers.
-2. **4-axis.** Continuous rotary roughing and finishing, plus wrap and unwrap.
-3. **5-axis finishing.**
+1. **4-axis.** Continuous rotary roughing and finishing, plus wrap and unwrap.
+2. **5-axis finishing.**
    - Swarf, multi-axis flowline and surface-normal strategies with lead/lag and
      tilt control.
    - Tool-axis smoothing.
    - One application pack: port machining is the first candidate.
-4. **AI agent integration.**
+3. **AI agent integration.**
    - An MCP server exposing `machine`, `check`, `post`, `ik`, and later `plan`,
      `collide` and `reach` as tools.
    - The agent proposes setups and orientations, and explains simulator
      findings in shop terms.
    - The agent never bypasses verification: every agent-produced program goes
      through `check`.
-5. **Fusion adapter.**
+4. **Fusion adapter.**
    - The add-in reads the machine definition (`adsk.cam.Machine`), BRep/mesh,
      stock and tools.
    - It runs `pat` through the Python wheel and previews toolpaths with custom

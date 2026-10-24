@@ -15,10 +15,13 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 use pat_core::access::{cap_directions, reachable_directions, tilt_to_avoid, TiltOptions};
-use pat_core::collision::{SceneDef, World};
+use pat_core::collision::{Role, SceneDef, World};
 use pat_core::interp::Severity;
 use pat_core::math::Vec3;
+use pat_core::orient::{select_orientations, OrientOptions};
+use pat_core::plan::{auto_rough, stock_from_world, AutoRoughParams};
 use pat_core::post::{post, ClProgram, Dialect, PostOptions};
+use pat_core::rough::{machining_frame, rough_with, RoughParams};
 use pat_core::sim::{simulate, SimOptions};
 use pat_core::{Kinematics, MachineDef, Pose};
 use std::path::{Path, PathBuf};
@@ -71,6 +74,13 @@ enum Cmd {
         /// Tool already in the spindle at program start.
         #[arg(long)]
         initial_tool: Option<u32>,
+        /// Simulate material removal on the scene's stock (gouges, rapids
+        /// into stock, holders rubbing, removed volume).
+        #[arg(long)]
+        stock: bool,
+        /// Voxel size for stock simulation (mm).
+        #[arg(long, default_value_t = 0.5)]
+        stock_resolution: f64,
         /// Include the machine state after every move.
         #[arg(long)]
         trace: bool,
@@ -98,6 +108,59 @@ enum Cmd {
         /// Largest tilt to try (degrees).
         #[arg(long, default_value_t = 60.0)]
         max_tilt: f64,
+    },
+    /// Choose 3+2 orientations that reach the scene's part (JSON).
+    Orient {
+        #[arg(short, long)]
+        machine: PathBuf,
+        #[arg(long)]
+        scene: PathBuf,
+        /// Tool for the clearance check.
+        #[arg(long)]
+        tool: Option<u32>,
+        /// Usable flute length for flank-cut walls (mm).
+        #[arg(long, default_value_t = 25.0)]
+        max_wall_depth: f64,
+        /// Largest tilt from vertical to consider (degrees).
+        #[arg(long, default_value_t = 120.0)]
+        max_tilt: f64,
+    },
+    /// Adaptive roughing of the scene's stock down to its part. Writes CL
+    /// data (JSON) for `pat post`, or G-code directly with --gcode.
+    Rough {
+        #[arg(short, long)]
+        machine: PathBuf,
+        #[arg(long)]
+        scene: PathBuf,
+        #[arg(long)]
+        tool: u32,
+        /// Fixed tool axis (WCS); default straight down.
+        #[arg(long, value_parser = parse_vec3, allow_hyphen_values = true)]
+        axis: Option<Vec3>,
+        /// Choose 3+2 orientations automatically and rough from each.
+        #[arg(long)]
+        auto: bool,
+        #[arg(long, default_value_t = 3.0)]
+        stepdown: f64,
+        /// Radial width of cut (mm); default 15% of the cutter diameter.
+        #[arg(long)]
+        stepover: Option<f64>,
+        #[arg(long, default_value_t = 0.3)]
+        leave: f64,
+        #[arg(long, default_value_t = 0.5)]
+        resolution: f64,
+        #[arg(long, default_value_t = 2000.0)]
+        feed: f64,
+        #[arg(long, default_value_t = 10000.0)]
+        rpm: f64,
+        /// Output CL JSON path (default: stdout).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Also post straight to G-code at this path.
+        #[arg(long)]
+        gcode: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = DialectArg::FanucTcp)]
+        dialect: DialectArg,
     },
     /// Reachability map: which tool directions around an axis reach a point.
     Reach {
@@ -283,6 +346,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             dwell_ms,
             scene,
             initial_tool,
+            stock,
+            stock_resolution,
             trace,
             json,
         } => {
@@ -297,6 +362,8 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             let opts = SimOptions {
                 world,
                 initial_tool,
+                simulate_stock: stock,
+                stock_resolution,
                 tool_lengths: tools.into_iter().collect(),
                 tool_length,
                 tip_tolerance,
@@ -331,6 +398,12 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                     "  cycle time {:.1}s ({} model, dwell {:.1}s)",
                     r.cycle_time_s, r.cycle_time_model, r.dwell_time_s
                 );
+                if let Some(st) = &r.stock {
+                    println!(
+                        "  stock: removed {:.0} mm³ of {:.0} mm³, {:.0} mm³ left ({} mm voxels)",
+                        st.removed_mm3, st.initial_mm3, st.remaining_mm3, st.resolution_mm
+                    );
+                }
                 for a in &r.axis_ranges {
                     println!("  {:<2} {:>10.3} .. {:<10.3}", a.axis, a.min, a.max);
                 }
@@ -426,6 +499,154 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             } else {
                 ExitCode::from(1)
             })
+        }
+        Cmd::Orient {
+            machine,
+            scene,
+            tool,
+            max_wall_depth,
+            max_tilt,
+        } => {
+            let m = load_machine(&machine)?;
+            let world = load_world(&machine, &m, Some(&scene))?;
+            let len = tool.map_or(m.default_tool_length, |t| tool_length_for(&world, &m, t));
+            let k = Kinematics::new(m.clone(), len).map_err(|e| e.to_string())?;
+            let parts: Vec<&pat_core::geom::Mesh> = world
+                .table_meshes(Role::Part)
+                .into_iter()
+                .map(|(_, mesh)| mesh)
+                .collect();
+            if parts.is_empty() {
+                return Err("the scene has no body with role = \"part\"".into());
+            }
+            let opts = OrientOptions {
+                tool,
+                max_wall_depth,
+                max_tilt_deg: max_tilt,
+                ..Default::default()
+            };
+            let r = select_orientations(&parts, &k, Some(&world), m.wcs_origin, &opts);
+            for o in &r.orientations {
+                eprintln!("{}", o.explanation);
+            }
+            println!("{}", to_json(&r));
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::Rough {
+            machine,
+            scene,
+            tool,
+            axis,
+            auto,
+            stepdown,
+            stepover,
+            leave,
+            resolution,
+            feed,
+            rpm,
+            output,
+            gcode,
+            dialect,
+        } => {
+            let m = load_machine(&machine)?;
+            let world = load_world(&machine, &m, Some(&scene))?;
+            let asm = world
+                .tool(tool)
+                .ok_or_else(|| format!("tool T{tool} is not in the scene"))?;
+            let cutter = asm
+                .cutter_shape()
+                .ok_or_else(|| format!("tool T{tool} has no cutter section"))?;
+            let k = Kinematics::new(m.clone(), asm.def.gauge_length).map_err(|e| e.to_string())?;
+            let parts: Vec<&pat_core::geom::Mesh> = world
+                .table_meshes(Role::Part)
+                .into_iter()
+                .map(|(_, mesh)| mesh)
+                .collect();
+            let mut stock = stock_from_world(&world, resolution)
+                .ok_or("the scene has no body with role = \"stock\"")?;
+            let rp = RoughParams {
+                cutter,
+                stepdown,
+                stepover: stepover.unwrap_or(cutter.radius * 0.3),
+                leave,
+                resolution,
+                feed,
+                plunge_feed: feed * 0.3,
+                link_feed: feed * 1.5,
+                ..Default::default()
+            };
+            let moves = if auto {
+                let mut ap = AutoRoughParams {
+                    rough: rp,
+                    ..Default::default()
+                };
+                ap.orient.tool = Some(tool);
+                let r = auto_rough(&parts, &mut stock, &k, Some(&world), m.wcs_origin, &ap);
+                for s in &r.setups {
+                    eprintln!("{}", s.orientation.explanation);
+                    for w in &s.warnings {
+                        eprintln!("  warning: {w}");
+                    }
+                }
+                eprintln!("{}", r.summary);
+                r.moves
+            } else {
+                let axis = axis.unwrap_or(Vec3::Z);
+                let sol = k
+                    .inverse(
+                        &Pose {
+                            tip: Vec3::ZERO,
+                            axis,
+                        },
+                        None,
+                    )
+                    .map_err(|e| format!("axis {axis:?} is not reachable: {e}"))?;
+                let obstacles = world.setup_obstacles(&k, &sol.joints);
+                let obs: Vec<&pat_core::geom::Mesh> = obstacles.iter().collect();
+                let sections = world.head_sections(&k, Some(tool));
+                let f = machining_frame(m.wcs_origin, axis);
+                let r = rough_with(&parts, &obs, &sections, &mut stock, &f, m.wcs_origin, &rp);
+                for w in &r.warnings {
+                    eprintln!("warning: {w}");
+                }
+                eprintln!(
+                    "{} levels, removed {:.0} mm³, {:.0} mm³ of stock left",
+                    r.levels.len(),
+                    r.removed_mm3,
+                    r.remaining_mm3
+                );
+                r.moves
+            };
+            let cl = ClProgram {
+                name: format!("rough T{tool}"),
+                tool: pat_core::post::ClTool {
+                    number: tool,
+                    length: asm.def.gauge_length,
+                    diameter: Some(cutter.radius * 2.0),
+                },
+                spindle_rpm: Some(rpm),
+                coolant: true,
+                moves,
+            };
+            let json = to_json(&cl);
+            match output {
+                Some(p) => std::fs::write(&p, json).map_err(|e| format!("{}: {e}", p.display()))?,
+                None if gcode.is_none() => println!("{json}"),
+                None => {}
+            }
+            if let Some(g) = gcode {
+                let opts = PostOptions {
+                    dialect: match dialect {
+                        DialectArg::LinuxcncJoint => Dialect::LinuxcncJoint,
+                        DialectArg::FanucTcp => Dialect::FanucTcp,
+                    },
+                    ..Default::default()
+                };
+                let out = post(&m, &cl, &opts).map_err(|e| e.to_string())?;
+                std::fs::write(&g, &out.gcode).map_err(|e| format!("{}: {e}", g.display()))?;
+                eprintln!("wrote {} blocks to {}", out.blocks, g.display());
+            }
+            Ok(ExitCode::SUCCESS)
         }
         Cmd::Reach {
             machine,

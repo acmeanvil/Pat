@@ -11,13 +11,16 @@ The goal is a toolpath planner with these features:
 The core is a Rust library with Python bindings. Fusion is the first host, and
 the same engine works from the command line or any Python environment.
 
-**Status: milestones 1 and 2 of 6 are done.**
+**Status: milestones 1–3 of 6 are done.**
 
 - **Milestone 1:** machine models, forward and inverse kinematics, a G-code
   simulator and a multi-axis post. The simulator covers work offsets, canned
   cycles, subroutines, G68.2 tilted planes and acceleration-aware cycle time.
 - **Milestone 2:** tool, holder, fixture and machine collision checking, plus
-  explainable tilt-to-avoid and reachability maps. See [docs/architecture.md](docs/architecture.md) for the
+  explainable tilt-to-avoid and reachability maps.
+- **Milestone 3:** automatic 3+2 orientation selection, adaptive
+  (constant-engagement) roughing with rest machining, and material-removal
+  simulation with gouge detection. See [docs/architecture.md](docs/architecture.md) for the
 design and roadmap, and
 [reports/CAM software landscape survey.md](reports/CAM%20software%20landscape%20survey.md)
 for the market research behind it.
@@ -53,6 +56,11 @@ cargo run -- check examples/vise-crash.ngc -m machines/trunnion-ac.toml --scene 
 
 # Smallest tilt that clears the clamp, with an explanation
 cargo run -- tilt -m machines/trunnion-ac.toml --scene examples/vise-setup.toml --tool 1 --tip 0,15,0
+
+# Automatic 3+2 roughing, then verify with collision and stock simulation
+cargo run --release -- orient -m machines/trunnion-ac.toml --scene examples/overhang-setup.toml --tool 1
+cargo run --release -- rough -m machines/trunnion-ac.toml --scene examples/overhang-setup.toml --tool 1 --auto --gcode /tmp/overhang.ngc
+cargo run --release -- check /tmp/overhang.ngc -m machines/trunnion-ac.toml --scene examples/overhang-setup.toml --stock
 ```
 
 Add `--json` to `check` or `machine` for machine-readable output. Use

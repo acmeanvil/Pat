@@ -22,16 +22,19 @@
 //! ranges. The output is plain serialisable data so a UI or an AI agent can
 //! consume it directly.
 
-use crate::collision::{MoveClass, World};
+use crate::collision::{MoveClass, Role, World};
 use crate::gcode::parse_program;
+use crate::geom::{Aabb, Bvh};
 use crate::interp::{
     interpret, ArcCenter, Coords, Cycle, Event, Feed, InterpOptions, Motion, MotionKind, Plane,
     Severity, TiltedPlane,
 };
+use crate::kinematics::Link;
 use crate::kinematics::{KinError, Kinematics, Pose};
 use crate::machine::MachineDef;
 use crate::math::{Mat3, Vec3};
 use crate::planner::{plan_time, PlanSeg};
+use crate::stock::Voxels;
 use crate::subs::expand;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -71,6 +74,14 @@ pub struct SimOptions {
     pub initial_tool: Option<u32>,
     /// Collision sampling step along linear motion (mm).
     pub collision_step_mm: f64,
+    /// Simulate material removal on the scene's stock bodies (needs a world
+    /// with stock and tool cutter geometry): reports rapids into stock,
+    /// holders rubbing stock, gouges into the part, and removed volume.
+    pub simulate_stock: bool,
+    /// Voxel size for stock simulation (mm).
+    pub stock_resolution: f64,
+    /// Cuts into the part shallower than this are not gouges (mm).
+    pub gouge_tolerance: f64,
 }
 
 impl Default for SimOptions {
@@ -89,6 +100,9 @@ impl Default for SimOptions {
             world: None,
             initial_tool: None,
             collision_step_mm: 1.0,
+            simulate_stock: false,
+            stock_resolution: 0.5,
+            gouge_tolerance: 0.05,
         }
     }
 }
@@ -133,6 +147,9 @@ pub struct Report {
     pub rapid_time_s: f64,
     pub dwell_time_s: f64,
     pub cutting_length_mm: f64,
+    /// Material-removal results when stock simulation ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stock: Option<StockReport>,
     /// Best available total time estimate (seconds).
     pub cycle_time_s: f64,
     /// "acceleration" (look-ahead planner) or "feed-rate" (no acceleration
@@ -141,6 +158,14 @@ pub struct Report {
     pub axis_ranges: Vec<AxisRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<Vec<TracePoint>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StockReport {
+    pub resolution_mm: f64,
+    pub initial_mm3: f64,
+    pub removed_mm3: f64,
+    pub remaining_mm3: f64,
 }
 
 /// Fallback rapid rates when the machine file gives none.
@@ -190,6 +215,14 @@ struct Sim<'a> {
     stop_next: bool,
     cycle_initial: Option<f64>,
     tool: Option<u32>,
+    stock: Option<Voxels>,
+    part_core: Option<Voxels>,
+    stock_initial: f64,
+    /// Tool-tip travel since the last holder-vs-stock check.
+    since_rub_check: f64,
+    last_tip: Option<Vec3>,
+    /// Cutter pose (table frame) at the previous stock sample.
+    last_pose: Option<Pose>,
 }
 
 /// Rotation of a G68.2 frame: intrinsic Z-X-Z Euler angles.
@@ -233,7 +266,14 @@ impl<'a> Sim<'a> {
             stop_next: true,
             cycle_initial: None,
             tool: opts.initial_tool,
+            stock: None,
+            part_core: None,
+            stock_initial: 0.0,
+            since_rub_check: f64::INFINITY,
+            last_tip: None,
+            last_pose: None,
         };
+        s.init_stock();
         s.rebuild_kinematics(0);
         s
     }
@@ -321,6 +361,7 @@ impl<'a> Sim<'a> {
             } => self.issue(line, severity, code, message),
             Event::ToolChange { line, tool } => {
                 self.tool = Some(tool);
+                self.last_pose = None;
                 let from_world = self
                     .opts
                     .world
@@ -677,6 +718,8 @@ impl<'a> Sim<'a> {
                 .iter()
                 .map(|&i| (qb[i] - qa[i]).abs())
                 .fold(0.0, f64::max);
+            // Stock removal sweeps exactly between samples, so the
+            // collision step is fine-grained enough for it too.
             let step = self.opts.collision_step_mm.max(0.01);
             n = n.max((max_lin / step).ceil() as usize).clamp(1, 100_000);
         }
@@ -710,6 +753,7 @@ impl<'a> Sim<'a> {
             };
             self.check_limits(line, &q);
             self.check_collisions(kin, line, rapid, &q);
+            self.stock_step(kin, line, rapid, &q);
             samples.push(q.clone());
             let pose = kin.forward(&q);
             if let Some(s) = kin.singularity_angle_deg(pose.axis) {
@@ -835,6 +879,136 @@ impl<'a> Sim<'a> {
         self.q = qb;
     }
 
+    fn init_stock(&mut self) {
+        if !self.opts.simulate_stock {
+            return;
+        }
+        let Some(world) = self.opts.world.clone() else {
+            self.issue(
+                0,
+                Severity::Warning,
+                "stock",
+                "stock simulation needs a scene".into(),
+            );
+            return;
+        };
+        let stocks = world.table_meshes(Role::Stock);
+        if stocks.is_empty() {
+            self.issue(
+                0,
+                Severity::Warning,
+                "stock",
+                "stock simulation needs a body with role = \"stock\"".into(),
+            );
+            return;
+        }
+        let res = self.opts.stock_resolution.max(0.05);
+        let bounds = stocks
+            .iter()
+            .fold(Aabb::EMPTY, |b, (_, m)| b.union(m.aabb()))
+            .expand(res);
+        let mut v = Voxels::empty(bounds.min, bounds.max, res);
+        for (_, m) in &stocks {
+            v.fill_mesh(m, &Bvh::build(m));
+        }
+        self.stock_initial = v.volume();
+        self.stock = Some(v);
+        let parts = world.table_meshes(Role::Part);
+        if !parts.is_empty() {
+            let pb = parts
+                .iter()
+                .fold(Aabb::EMPTY, |b, (_, m)| b.union(m.aabb()))
+                .expand(res);
+            let mut p = Voxels::empty(pb.min, pb.max, res);
+            for (_, m) in &parts {
+                p.fill_mesh(m, &Bvh::build(m));
+            }
+            let k = ((self.opts.gouge_tolerance / res).ceil() as usize).max(1);
+            self.part_core = Some(p.eroded(k));
+        }
+    }
+
+    /// Material removal, gouge and rubbing checks at one sampled position.
+    fn stock_step(&mut self, kin: &Kinematics, line: usize, rapid: bool, q: &[f64]) {
+        if self.stock.is_none() {
+            return;
+        }
+        let Some(world) = self.opts.world.clone() else {
+            return;
+        };
+        let Some(asm) = self.tool.and_then(|t| world.tool(t)) else {
+            return;
+        };
+        let Some(shape) = asm.cutter_shape() else {
+            return;
+        };
+        let table = kin.link("table").unwrap_or(Link::Base);
+        let frame = kin
+            .link_iso(table, q)
+            .inverse()
+            .then(&kin.link_iso(Link::Tool, q));
+        let tag = format!("T{}", asm.def.number);
+
+        let cur = Pose {
+            tip: frame.t,
+            axis: frame.apply_vec(Vec3::Z),
+        };
+        let from = self.last_pose.unwrap_or(cur);
+        self.last_pose = Some(cur);
+        if let Some(core) = &self.part_core {
+            if let Some(at) = core.sweep_hits(&from, &cur, &shape) {
+                let at = at - kin.machine().wcs_origin;
+                let msg = format!(
+                    "{tag} cutter cuts into the part near X{:.2} Y{:.2} Z{:.2}",
+                    at.x, at.y, at.z
+                );
+                self.issue(line, Severity::Error, "gouge", msg);
+            }
+        }
+        let Some(mut stock) = self.stock.take() else {
+            return;
+        };
+        let bounds = stock.bounds();
+        // Rubbing is checked at the collision step, not every removal sample.
+        let tip = frame.t;
+        self.since_rub_check += self.last_tip.map_or(f64::INFINITY, |t| t.distance(tip));
+        self.last_tip = Some(tip);
+        let check_rub = self.since_rub_check >= self.opts.collision_step_mm;
+        if check_rub {
+            self.since_rub_check = 0.0;
+        }
+        for (z0, h, r) in asm
+            .non_cutting_cylinders()
+            .into_iter()
+            .filter(|_| check_rub)
+        {
+            let local = Aabb {
+                min: Vec3::new(-r, -r, z0),
+                max: Vec3::new(r, r, z0 + h),
+            };
+            if local.transformed(&frame).overlaps(&bounds) && stock.cylinder_hits(&frame, z0, h, r)
+            {
+                let msg = format!("{tag} shank or holder rubs the remaining stock");
+                self.issue(line, Severity::Error, "holder_rubs_stock", msg);
+                break;
+            }
+        }
+        if rapid {
+            if stock.sweep_hits(&from, &cur, &shape).is_some() {
+                stock.sweep(&from, &cur, &shape);
+                self.issue(
+                    line,
+                    Severity::Error,
+                    "rapid_into_stock",
+                    format!("rapid move: {tag} cutter enters the stock"),
+                );
+            }
+        } else {
+            stock.sweep(&from, &cur, &shape);
+        }
+        self.stock = Some(stock);
+    }
+
     fn check_collisions(&mut self, kin: &Kinematics, line: usize, rapid: bool, q: &[f64]) {
         let Some(world) = self.opts.world.clone() else {
             return;
@@ -925,7 +1099,14 @@ impl<'a> Sim<'a> {
             Some(t) => (t + self.dwell_s, "acceleration".to_string()),
             None => (feed_total, "feed-rate".to_string()),
         };
+        let stock = self.stock.as_ref().map(|v| StockReport {
+            resolution_mm: v.res,
+            initial_mm3: self.stock_initial,
+            removed_mm3: self.stock_initial - v.volume(),
+            remaining_mm3: v.volume(),
+        });
         Report {
+            stock,
             machine: self.def.name.clone(),
             cycle_time_s,
             cycle_time_model,

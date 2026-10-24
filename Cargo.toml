@@ -18,3 +18,7 @@ serde_json = "1"
 toml = "0.8"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
+
+# Geometry and simulation code is numeric; unoptimised builds make tests slow.
+[profile.dev]
+opt-level = 2

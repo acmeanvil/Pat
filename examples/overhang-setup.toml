@@ -1,0 +1,30 @@
+# 3+2 roughing demo for machines/trunnion-ac.toml: a 20 x 20 base under a
+# 40 x 40 plate. The walls under the overhang need tilted setups.
+#   pat orient -m machines/trunnion-ac.toml --scene examples/overhang-setup.toml --tool 1
+#   pat rough  -m machines/trunnion-ac.toml --scene examples/overhang-setup.toml --tool 1 --auto --gcode /tmp/overhang.ngc
+#   pat check /tmp/overhang.ngc -m machines/trunnion-ac.toml --scene examples/overhang-setup.toml --stock
+
+[[tools]]
+number = 1
+name = "6 mm flat end mill, 25 mm flute, shrink-fit holder"
+gauge_length = 90.0
+segments = [
+  { kind = "cutter", length = 25.0, diameter = 6.0 },
+  { kind = "shank",  length = 20.0, diameter = 6.0 },
+  { kind = "holder", length = 40.0, diameter = 30.0 },
+]
+
+[[bodies]]
+name = "stock"
+role = "stock"
+shape = { type = "box", min = [-22.0, -22.0, -25.0], max = [22.0, 22.0, 2.0] }
+
+[[bodies]]
+name = "base"
+role = "part"
+shape = { type = "box", min = [-10.0, -10.0, -25.0], max = [10.0, 10.0, -5.0] }
+
+[[bodies]]
+name = "plate"
+role = "part"
+shape = { type = "box", min = [-20.0, -20.0, -5.0], max = [20.0, 20.0, 0.0] }

@@ -18,8 +18,14 @@
 //! ```
 
 use pat_core::access::{cap_directions, reachable_directions, tilt_to_avoid, TiltOptions};
-use pat_core::collision::{SceneDef, World};
+use pat_core::collision::{Role, SceneDef, World};
+use pat_core::geom::Mesh;
+use pat_core::math::Vec3;
+use pat_core::orient::{select_orientations, OrientOptions};
+use pat_core::plan::{auto_rough, stock_from_world, AutoRoughParams};
+use pat_core::post::ClTool;
 use pat_core::post::{post as post_cl, ClProgram, PostOptions};
+use pat_core::rough::{machining_frame, rough_with, RoughParams};
 use pat_core::sim::{simulate, SimOptions};
 use pat_core::{Kinematics, MachineDef, Pose};
 use pyo3::exceptions::PyValueError;
@@ -126,6 +132,109 @@ fn tilt(
     serde_json::to_string(&r).map_err(err)
 }
 
+/// Choose 3+2 orientations for the scene's part; JSON with each
+/// orientation's axis, joints, G68.2 angles and explanation.
+#[pyfunction]
+#[pyo3(signature = (machine_src, scene_toml, options_json=None, scene_dir=None, machine_dir=None))]
+fn orient(
+    machine_src: &str,
+    scene_toml: &str,
+    options_json: Option<&str>,
+    scene_dir: Option<&str>,
+    machine_dir: Option<&str>,
+) -> PyResult<String> {
+    let m = machine(machine_src)?;
+    let w = world(&m, Some(scene_toml), scene_dir, machine_dir)?;
+    let o: OrientOptions = opts(options_json)?;
+    let k = match o.tool {
+        Some(t) => kin_for_tool(&m, &w, t)?,
+        None => Kinematics::new(m.clone(), m.default_tool_length).map_err(err)?,
+    };
+    let parts: Vec<&Mesh> = w
+        .table_meshes(Role::Part)
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    serde_json::to_string(&select_orientations(&parts, &k, Some(&w), m.wcs_origin, &o)).map_err(err)
+}
+
+/// Adaptive roughing of the scene's stock to its part with tool `tool`.
+/// `params_json` overrides RoughParams fields (the cutter comes from the
+/// tool). With `auto`, 3+2 orientations are chosen automatically; otherwise
+/// the tool stays along `axis`. Returns {"cl": CL program, "summary": ...}.
+#[pyfunction]
+#[pyo3(signature = (machine_src, scene_toml, tool, params_json=None, axis=None, auto=false, scene_dir=None, machine_dir=None))]
+#[allow(clippy::too_many_arguments)]
+fn rough(
+    machine_src: &str,
+    scene_toml: &str,
+    tool: u32,
+    params_json: Option<&str>,
+    axis: Option<[f64; 3]>,
+    auto: bool,
+    scene_dir: Option<&str>,
+    machine_dir: Option<&str>,
+) -> PyResult<String> {
+    let m = machine(machine_src)?;
+    let w = world(&m, Some(scene_toml), scene_dir, machine_dir)?;
+    let asm = w
+        .tool(tool)
+        .ok_or_else(|| err(format!("tool T{tool} is not in the scene")))?;
+    let cutter = asm
+        .cutter_shape()
+        .ok_or_else(|| err(format!("tool T{tool} has no cutter section")))?;
+    let k = kin_for_tool(&m, &w, tool)?;
+    let mut rp: RoughParams = opts(params_json)?;
+    rp.cutter = cutter;
+    let parts: Vec<&Mesh> = w
+        .table_meshes(Role::Part)
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect();
+    let mut stock =
+        stock_from_world(&w, rp.resolution).ok_or_else(|| err("the scene has no stock body"))?;
+    let (moves, summary) = if auto {
+        let mut ap = AutoRoughParams {
+            rough: rp,
+            ..Default::default()
+        };
+        ap.orient.tool = Some(tool);
+        let r = auto_rough(&parts, &mut stock, &k, Some(&w), m.wcs_origin, &ap);
+        let summary = serde_json::json!({ "summary": r.summary, "setups": r.setups, "removed_mm3": r.removed_mm3, "remaining_mm3": r.remaining_mm3 });
+        (r.moves, summary)
+    } else {
+        let axis: Vec3 = axis.unwrap_or([0.0, 0.0, 1.0]).into();
+        let sol = k
+            .inverse(
+                &Pose {
+                    tip: Vec3::ZERO,
+                    axis,
+                },
+                None,
+            )
+            .map_err(err)?;
+        let obstacles = w.setup_obstacles(&k, &sol.joints);
+        let obs: Vec<&Mesh> = obstacles.iter().collect();
+        let sections = w.head_sections(&k, Some(tool));
+        let f = machining_frame(m.wcs_origin, axis);
+        let r = rough_with(&parts, &obs, &sections, &mut stock, &f, m.wcs_origin, &rp);
+        let summary = serde_json::json!({ "levels": r.levels, "removed_mm3": r.removed_mm3, "remaining_mm3": r.remaining_mm3, "warnings": r.warnings });
+        (r.moves, summary)
+    };
+    let cl = ClProgram {
+        name: format!("rough T{tool}"),
+        tool: ClTool {
+            number: tool,
+            length: asm.def.gauge_length,
+            diameter: Some(cutter.radius * 2.0),
+        },
+        spindle_rpm: None,
+        coolant: true,
+        moves,
+    };
+    serde_json::to_string(&serde_json::json!({ "cl": cl, "summary": summary })).map_err(err)
+}
+
 /// Reachability map: directions within `cone_deg` of `axis` and whether
 /// each reaches `tip` without collision.
 #[pyfunction]
@@ -204,6 +313,8 @@ fn pat_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(post, m)?)?;
     m.add_function(wrap_pyfunction!(tilt, m)?)?;
     m.add_function(wrap_pyfunction!(reach, m)?)?;
+    m.add_function(wrap_pyfunction!(orient, m)?)?;
+    m.add_function(wrap_pyfunction!(rough, m)?)?;
     m.add_function(wrap_pyfunction!(forward, m)?)?;
     m.add_function(wrap_pyfunction!(inverse, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
