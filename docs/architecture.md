@@ -22,9 +22,9 @@ The same core can serve a CLI, FreeCAD, a web app or an AI agent.
 ## Layers
 
 ```
-            Fusion add-in (Python)   CLI (pat)   AI agent tools (MCP, planned)
+            Fusion add-in (Python)   CLI (pat)   AI agents (MCP)
                        \                |              /
-                        pat-py (Python bindings, JSON in/out)
+              pat-py (Python, JSON in/out)   pat-mcp (MCP server over session)
                                         |
   pat-core ─────────────────────────────────────────────────────────────
    planning (planned)   strategies: adaptive/HSM, 3+2, 4-axis, 5-axis
@@ -287,16 +287,33 @@ Known limits:
 - Passing close to the singular direction between points can still swing C
   quickly; the simulator flags these moves.
 
+## Milestone 6: AI agent integration (done)
+
+- **`pat_core::session::Session`**: a JSON-in / JSON-out workspace holding the
+  machine, the setup and the generated programs.
+  - **Verification is part of generation.** Every generating call posts and
+    replays its program (collisions, plus stock simulation when the setup has
+    stock). It stores `verified` and a condensed report with a remedy per
+    issue kind.
+  - **Saving is gated.** Programs that failed verification are not saved
+    unless explicitly forced.
+  - **Paths are confined** to the workspace root.
+- **`pat-mcp`**: a dependency-free MCP stdio server (JSON-RPC 2.0, protocol
+  versions 2024-11-05 to 2025-06-18).
+  - It exposes 13 tools with JSON schemas.
+  - Results are returned as text and as `structuredContent`.
+  - Server `instructions` describe the workflow and the safety rules.
+- `.mcp.json` registers it for Claude Code in this repository.
+  [docs/agent.md](agent.md) covers setup for other clients and an example
+  session.
+
+Tested through the API and over real stdio with the built binary: handshake,
+tool schemas, tool errors, path confinement, a full plan → rough → verify →
+save workflow, and remedies for a crashing program.
+
 ## Roadmap
 
-1. **AI agent integration.**
-   - An MCP server exposing `machine`, `check`, `post`, `ik`, and later `plan`,
-     `collide` and `reach` as tools.
-   - The agent proposes setups and orientations, and explains simulator
-     findings in shop terms.
-   - The agent never bypasses verification: every agent-produced program goes
-     through `check`.
-2. **Fusion adapter.**
+1. **Fusion adapter.**
    - The add-in reads the machine definition (`adsk.cam.Machine`), BRep/mesh,
      stock and tools.
    - It runs `pat` through the Python wheel and previews toolpaths with custom

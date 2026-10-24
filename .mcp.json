@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "pat": {
+      "command": "cargo",
+      "args": ["run", "-q", "--release", "-p", "pat-mcp", "--", "--root", "."]
+    }
+  }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "pat-mcp"
+description = "MCP server exposing the Pat CAM core to AI agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pat-mcp"
+path = "src/main.rs"
+
+[dependencies]
+pat-core.workspace = true
+serde_json.workspace = true

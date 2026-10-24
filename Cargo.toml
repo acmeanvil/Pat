@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/pat-core", "crates/pat-cli", "crates/pat-py"]
+members = ["crates/pat-core", "crates/pat-cli", "crates/pat-mcp", "crates/pat-py"]
 # pat-py is a Python extension module; build it with maturin, not plain cargo.
-default-members = ["crates/pat-core", "crates/pat-cli"]
+default-members = ["crates/pat-core", "crates/pat-cli", "crates/pat-mcp"]
 
 [workspace.package]
 version = "0.1.0"

@@ -183,6 +183,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pat-mcp"
+version = "0.1.0"
+dependencies = [
+ "pat-core",
+ "serde_json",
+]
+
+[[package]]
 name = "pat-py"
 version = "0.1.0"
 dependencies = [
